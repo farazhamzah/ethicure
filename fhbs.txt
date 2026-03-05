@@ -1,0 +1,20 @@
+Demo credentials (seeded):
+
+Patient (use in the patient UI): patient@example.com / adminpass
+Admin: admin@example.com / adminpass
+Doctor: doctor@example.com / adminpass
+
+
+
+Host: if you’re on the same machine, use 127.0.0.1; if remote, use the server’s public IP (shown by Vite as 72.62.116.36).
+Port: 5432 (container is mapped to host 5432).
+DB: health_app
+User: health_admin
+Password: StrongPass123
+SSL: Disabled
+
+
+cd /var/www/v0.1/FrontEnd-TC/patient-app && VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host --port 3000
+source /var/www/v0.1/.venv/bin/activate
+export OPENAI_API_KEY="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"
+python manage.py runserver 0.0.0.0:8000
