@@ -1,8 +1,9 @@
 Demo credentials (seeded):
 
-Patient (use in the patient UI): patient@example.com / adminpass
-Admin: admin@example.com / adminpass
-Doctor: doctor@example.com / adminpass
+Patient: faraz722@hotmail.com / Hamzah@123
+Patient fh2046@hw.ac.uk / adminpass
+Admin: faraz@doctor.com / Faraz@123
+Doctor: faraz@admin.com / Faraz@123
 
 
 
@@ -14,7 +15,7 @@ Password: StrongPass123
 SSL: Disabled
 
 
-cd /var/www/v0.1/FrontEnd-TC/patient-app && VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host --port 3000
-source /var/www/v0.1/.venv/bin/activate
+cd /var/www/v0.3/ethicure && VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev -- --host
+source /var/www/v0.3/.venv/bin/activate
 export OPENAI_API_KEY="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"
 python manage.py runserver 0.0.0.0:8000
