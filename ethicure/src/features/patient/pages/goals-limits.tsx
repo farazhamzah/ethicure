@@ -52,11 +52,23 @@ const INITIAL_THRESHOLDS: ThresholdState = {
   spo2Low: 92,
 }
 
+const GOAL_LIMITS = {
+  dailySteps: { min: 1000, max: 50000 },
+} as const
+
+const THRESHOLD_LIMITS = {
+  heartRateLow: { min: 30, max: 220 },
+  heartRateHigh: { min: 30, max: 220 },
+  glucoseLow: { min: 50, max: 400 },
+  glucoseHigh: { min: 50, max: 400 },
+  spo2Low: { min: 80, max: 100 },
+} as const
+
 export default function GoalsLimitsPage() {
   const [goals, setGoals] = React.useState<GoalsState>(INITIAL_GOALS)
   const [thresholds, setThresholds] = React.useState<ThresholdState>(INITIAL_THRESHOLDS)
-  const [goalId, setGoalId] = React.useState<number | null>(null)
-  const [thresholdIds, setThresholdIds] = React.useState<ThresholdIds>({})
+  const [todayGoalId, setTodayGoalId] = React.useState<number | null>(null)
+  const [todayThresholdIds, setTodayThresholdIds] = React.useState<ThresholdIds>({})
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
@@ -74,9 +86,31 @@ export default function GoalsLimitsPage() {
         ])
         if (!active) return
 
-        const stepsGoal = goalData.find((goal) => goal.metric_type === "steps")
+        const sortedGoals = [...goalData].sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+        )
+        const now = new Date()
+        const todayIso = new Date().toISOString().slice(0, 10)
+
+        const isSameCalendarDay = (raw: string) => {
+          const dt = new Date(raw)
+          return (
+            dt.getFullYear() === now.getFullYear() &&
+            dt.getMonth() === now.getMonth() &&
+            dt.getDate() === now.getDate()
+          )
+        }
+
+        const todayStepsGoal = sortedGoals.find(
+          (goal) => goal.metric_type === "steps" && goal.start_date === todayIso,
+        )
+        setTodayGoalId(todayStepsGoal?.id ?? null)
+
+        const stepsGoal =
+          sortedGoals.find((goal) => goal.metric_type === "steps" && goal.is_active) ||
+          sortedGoals.find((goal) => goal.metric_type === "steps")
+
         if (stepsGoal) {
-          setGoalId(stepsGoal.id)
           setGoals({
             dailySteps: Number(stepsGoal.target_value) || INITIAL_GOALS.dailySteps,
           })
@@ -89,43 +123,62 @@ export default function GoalsLimitsPage() {
           return Number.isNaN(num) ? fallback : num
         }
 
-        const ids: ThresholdIds = {}
         const nextThresholds: ThresholdState = { ...INITIAL_THRESHOLDS }
 
-        const find = (metric: string, condition: string) =>
-          thresholdData.find(
+        const sortedThresholds = [...thresholdData].sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+        )
+
+        const todayIds: ThresholdIds = {
+          heartRateLow: sortedThresholds.find(
+            (t) => t.metric_type === "heart_rate" && t.condition === "below" && isSameCalendarDay(t.created_at),
+          )?.id,
+          heartRateHigh: sortedThresholds.find(
+            (t) => t.metric_type === "heart_rate" && t.condition === "above" && isSameCalendarDay(t.created_at),
+          )?.id,
+          glucoseLow: sortedThresholds.find(
+            (t) => t.metric_type === "glucose" && t.condition === "below" && isSameCalendarDay(t.created_at),
+          )?.id,
+          glucoseHigh: sortedThresholds.find(
+            (t) => t.metric_type === "glucose" && t.condition === "above" && isSameCalendarDay(t.created_at),
+          )?.id,
+          spo2Low: sortedThresholds.find(
+            (t) => t.metric_type === "oxygen" && t.condition === "below" && isSameCalendarDay(t.created_at),
+          )?.id,
+        }
+        setTodayThresholdIds(todayIds)
+
+        const findLatest = (metric: string, condition: string) =>
+          sortedThresholds.find(
+            (t) => t.metric_type === metric && t.condition === condition && t.is_active,
+          ) ||
+          sortedThresholds.find(
             (t) => t.metric_type === metric && t.condition === condition,
           )
 
-        const heartLow = find("heart_rate", "below")
+        const heartLow = findLatest("heart_rate", "below")
         if (heartLow) {
-          ids.heartRateLow = heartLow.id
           nextThresholds.heartRateLow = toNumber(heartLow.value, INITIAL_THRESHOLDS.heartRateLow)
         }
-        const heartHigh = find("heart_rate", "above")
+        const heartHigh = findLatest("heart_rate", "above")
         if (heartHigh) {
-          ids.heartRateHigh = heartHigh.id
           nextThresholds.heartRateHigh = toNumber(heartHigh.value, INITIAL_THRESHOLDS.heartRateHigh)
         }
 
-        const glucoseLow = find("glucose", "below")
+        const glucoseLow = findLatest("glucose", "below")
         if (glucoseLow) {
-          ids.glucoseLow = glucoseLow.id
           nextThresholds.glucoseLow = toNumber(glucoseLow.value, INITIAL_THRESHOLDS.glucoseLow)
         }
-        const glucoseHigh = find("glucose", "above")
+        const glucoseHigh = findLatest("glucose", "above")
         if (glucoseHigh) {
-          ids.glucoseHigh = glucoseHigh.id
           nextThresholds.glucoseHigh = toNumber(glucoseHigh.value, INITIAL_THRESHOLDS.glucoseHigh)
         }
 
-        const spo2Low = find("oxygen", "below")
+        const spo2Low = findLatest("oxygen", "below")
         if (spo2Low) {
-          ids.spo2Low = spo2Low.id
           nextThresholds.spo2Low = toNumber(spo2Low.value, INITIAL_THRESHOLDS.spo2Low)
         }
 
-        setThresholdIds(ids)
         setThresholds(nextThresholds)
       } catch (err) {
         if (!active) return
@@ -151,68 +204,141 @@ export default function GoalsLimitsPage() {
     setThresholds((prev) => ({ ...prev, [key]: Number.isNaN(numericValue) ? prev[key] : numericValue }))
   }
 
+  const validateBeforeSave = () => {
+    if (
+      goals.dailySteps < GOAL_LIMITS.dailySteps.min ||
+      goals.dailySteps > GOAL_LIMITS.dailySteps.max
+    ) {
+      return `Daily steps goal must be between ${GOAL_LIMITS.dailySteps.min} and ${GOAL_LIMITS.dailySteps.max}.`
+    }
+
+    const thresholdEntries: Array<[keyof ThresholdState, string]> = [
+      ["heartRateLow", "Heart rate low"],
+      ["heartRateHigh", "Heart rate high"],
+      ["glucoseLow", "Glucose low"],
+      ["glucoseHigh", "Glucose high"],
+      ["spo2Low", "SpO2 minimum"],
+    ]
+
+    for (const [key, label] of thresholdEntries) {
+      const value = thresholds[key]
+      const limits = THRESHOLD_LIMITS[key]
+      if (value < limits.min || value > limits.max) {
+        return `${label} must be between ${limits.min} and ${limits.max}.`
+      }
+    }
+
+    if (thresholds.heartRateLow >= thresholds.heartRateHigh) {
+      return "Heart rate low must be lower than heart rate high."
+    }
+
+    if (thresholds.glucoseLow >= thresholds.glucoseHigh) {
+      return "Glucose low must be lower than glucose high."
+    }
+
+    return null
+  }
+
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setSaving(true)
     setError(null)
 
     try {
+      const validationError = validateBeforeSave()
+      if (validationError) {
+        setError(validationError)
+        return
+      }
+
+      const todayIso = new Date().toISOString().slice(0, 10)
+
       const payload = {
         metricType: "steps" as const,
         targetValue: goals.dailySteps,
-        startDate: new Date().toISOString().slice(0, 10),
+        startDate: todayIso,
         isActive: true,
       }
 
-      const saved = goalId
-        ? await updateGoal(goalId, { targetValue: goals.dailySteps })
+      let sameDayGoalId = todayGoalId
+
+      if (!sameDayGoalId) {
+        const refreshedGoals = await listGoals()
+        sameDayGoalId = [...refreshedGoals]
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          .find((goal) => goal.metric_type === "steps" && goal.start_date === todayIso)?.id ?? null
+      }
+
+      const saved = sameDayGoalId
+        ? await updateGoal(sameDayGoalId, { targetValue: goals.dailySteps, isActive: true })
         : await createGoal(payload)
 
-      const savedAt = saved?.created_at ? new Date(saved.created_at) : new Date()
-      setGoalId(saved.id)
-      setLastSaved(savedAt)
+      setTodayGoalId(saved.id)
+      setLastSaved(new Date())
 
-      const thresholdPromises: Array<Promise<unknown>> = []
+      let refreshedThresholds: Awaited<ReturnType<typeof listThresholds>> | null = null
+      const now = new Date()
+      const isSameCalendarDay = (raw: string) => {
+        const dt = new Date(raw)
+        return (
+          dt.getFullYear() === now.getFullYear() &&
+          dt.getMonth() === now.getMonth() &&
+          dt.getDate() === now.getDate()
+        )
+      }
 
-      const upsertThreshold = (
+      const findSameDayThresholdId = async (
         existingId: number | undefined,
+        metricType: "heart_rate" | "glucose" | "oxygen",
+        condition: "above" | "below",
+      ) => {
+        if (existingId) return existingId
+        if (!refreshedThresholds) refreshedThresholds = await listThresholds()
+
+        return [...refreshedThresholds]
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          .find(
+            (t) =>
+              t.metric_type === metricType &&
+              t.condition === condition &&
+              isSameCalendarDay(t.created_at),
+          )?.id
+      }
+
+      const upsertThreshold = async (
+        key: keyof ThresholdIds,
         metricType: "heart_rate" | "glucose" | "oxygen",
         condition: "above" | "below",
         value: number,
       ) => {
-        if (existingId) {
-          return updateThreshold(existingId, { value })
-        }
-        return createThreshold({ metricType, condition, value, isActive: true })
+        const sameDayId = await findSameDayThresholdId(todayThresholdIds[key], metricType, condition)
+        const result = sameDayId
+          ? await updateThreshold(sameDayId, { value, isActive: true })
+          : await createThreshold({ metricType, condition, value, isActive: true })
+
+        setTodayThresholdIds((prev) => ({ ...prev, [key]: result.id }))
+        return result
       }
 
+      const thresholdPromises: Array<Promise<unknown>> = []
+
       thresholdPromises.push(
-        upsertThreshold(thresholdIds.heartRateLow, "heart_rate", "below", thresholds.heartRateLow),
+        upsertThreshold("heartRateLow", "heart_rate", "below", thresholds.heartRateLow),
       )
       thresholdPromises.push(
-        upsertThreshold(thresholdIds.heartRateHigh, "heart_rate", "above", thresholds.heartRateHigh),
+        upsertThreshold("heartRateHigh", "heart_rate", "above", thresholds.heartRateHigh),
       )
       thresholdPromises.push(
-        upsertThreshold(thresholdIds.glucoseLow, "glucose", "below", thresholds.glucoseLow),
+        upsertThreshold("glucoseLow", "glucose", "below", thresholds.glucoseLow),
       )
       thresholdPromises.push(
-        upsertThreshold(thresholdIds.glucoseHigh, "glucose", "above", thresholds.glucoseHigh),
+        upsertThreshold("glucoseHigh", "glucose", "above", thresholds.glucoseHigh),
       )
       thresholdPromises.push(
-        upsertThreshold(thresholdIds.spo2Low, "oxygen", "below", thresholds.spo2Low),
+        upsertThreshold("spo2Low", "oxygen", "below", thresholds.spo2Low),
       )
 
-      const results = await Promise.all(thresholdPromises)
-
-      // Capture ids for new thresholds
-      setThresholdIds((prev) => ({
-        ...prev,
-        heartRateLow: (results[0] as any)?.id ?? prev.heartRateLow,
-        heartRateHigh: (results[1] as any)?.id ?? prev.heartRateHigh,
-        glucoseLow: (results[2] as any)?.id ?? prev.glucoseLow,
-        glucoseHigh: (results[3] as any)?.id ?? prev.glucoseHigh,
-        spo2Low: (results[4] as any)?.id ?? prev.spo2Low,
-      }))
+      await Promise.all(thresholdPromises)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save goal.")
     } finally {
@@ -264,7 +390,8 @@ export default function GoalsLimitsPage() {
                   disabled={loading || saving}
                   value={goals.dailySteps}
                   onChange={(event) => handleGoalChange("dailySteps", event.target.value)}
-                  min={0}
+                  min={GOAL_LIMITS.dailySteps.min}
+                  max={GOAL_LIMITS.dailySteps.max}
                   step={100}
                 />
                 <FieldDescription>Typical guidance: 8k–12k steps per day.</FieldDescription>
@@ -295,8 +422,8 @@ export default function GoalsLimitsPage() {
                     disabled={loading || saving}
                     value={thresholds.heartRateLow}
                     onChange={(event) => handleThresholdChange("heartRateLow", event.target.value)}
-                    min={30}
-                    max={200}
+                    min={THRESHOLD_LIMITS.heartRateLow.min}
+                    max={THRESHOLD_LIMITS.heartRateLow.max}
                   />
                   <Input
                     type="number"
@@ -304,8 +431,8 @@ export default function GoalsLimitsPage() {
                     disabled={loading || saving}
                     value={thresholds.heartRateHigh}
                     onChange={(event) => handleThresholdChange("heartRateHigh", event.target.value)}
-                    min={40}
-                    max={220}
+                    min={THRESHOLD_LIMITS.heartRateHigh.min}
+                    max={THRESHOLD_LIMITS.heartRateHigh.max}
                   />
                   <FieldDescription className="sm:col-span-2">
                     Recommended: keep resting below 110 bpm.
@@ -322,8 +449,8 @@ export default function GoalsLimitsPage() {
                     disabled={loading || saving}
                     value={thresholds.glucoseLow}
                     onChange={(event) => handleThresholdChange("glucoseLow", event.target.value)}
-                    min={50}
-                    max={300}
+                    min={THRESHOLD_LIMITS.glucoseLow.min}
+                    max={THRESHOLD_LIMITS.glucoseLow.max}
                   />
                   <Input
                     type="number"
@@ -331,8 +458,8 @@ export default function GoalsLimitsPage() {
                     disabled={loading || saving}
                     value={thresholds.glucoseHigh}
                     onChange={(event) => handleThresholdChange("glucoseHigh", event.target.value)}
-                    min={80}
-                    max={400}
+                    min={THRESHOLD_LIMITS.glucoseHigh.min}
+                    max={THRESHOLD_LIMITS.glucoseHigh.max}
                   />
                   <FieldDescription className="sm:col-span-2">
                     Post-meal alerts often trigger above 160 mg/dL.
@@ -349,8 +476,8 @@ export default function GoalsLimitsPage() {
                     disabled={loading || saving}
                     value={thresholds.spo2Low}
                     onChange={(event) => handleThresholdChange("spo2Low", event.target.value)}
-                    min={80}
-                    max={100}
+                    min={THRESHOLD_LIMITS.spo2Low.min}
+                    max={THRESHOLD_LIMITS.spo2Low.max}
                     step={0.5}
                   />
                   <FieldDescription>Alert if saturation drops below this value.</FieldDescription>

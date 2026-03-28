@@ -6,6 +6,26 @@ from django.contrib.auth.hashers import check_password
 from .models import Staff, Patient, Device, Reading, Goal, Threshold, Alert, Notification, Report, DoctorPatientRequest
 
 
+GOAL_REALISTIC_RANGES = {
+    "heart_rate": (40, 220),
+    "glucose": (50, 400),
+    "steps": (1000, 50000),
+    "calories": (500, 8000),
+    "oxygen": (80, 100),
+    "weight": (30, 300),
+}
+
+THRESHOLD_REALISTIC_RANGES = {
+    "heart_rate": (30, 220),
+    "glucose": (50, 400),
+    "steps": (0, 100000),
+    "calories": (0, 12000),
+    "oxygen": (80, 100),
+    "weight": (20, 400),
+    "bmi": (10, 80),
+}
+
+
 class StaffSerializer(serializers.ModelSerializer):
     class Meta:
         model = Staff
@@ -193,6 +213,26 @@ class ReadingSerializer(serializers.ModelSerializer):
 
 
 class GoalSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        metric_type = attrs.get('metric_type') or getattr(self.instance, 'metric_type', None)
+        target_value = attrs.get('target_value')
+        if target_value is None and self.instance is not None:
+            target_value = getattr(self.instance, 'target_value', None)
+
+        if metric_type in GOAL_REALISTIC_RANGES and target_value is not None:
+            min_value, max_value = GOAL_REALISTIC_RANGES[metric_type]
+            if target_value < min_value or target_value > max_value:
+                raise serializers.ValidationError({
+                    'target_value': (
+                        f"Unrealistic goal for {metric_type}. "
+                        f"Expected between {min_value} and {max_value}."
+                    )
+                })
+
+        return attrs
+
     class Meta:
         model = Goal
         fields = "__all__"
@@ -200,6 +240,57 @@ class GoalSerializer(serializers.ModelSerializer):
 
 
 class ThresholdSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        patient = attrs.get('patient') or getattr(self.instance, 'patient', None)
+        metric_type = attrs.get('metric_type') or getattr(self.instance, 'metric_type', None)
+        condition = attrs.get('condition') or getattr(self.instance, 'condition', None)
+        value = attrs.get('value')
+        if value is None and self.instance is not None:
+            value = getattr(self.instance, 'value', None)
+
+        if metric_type in THRESHOLD_REALISTIC_RANGES and value is not None:
+            min_value, max_value = THRESHOLD_REALISTIC_RANGES[metric_type]
+            if value < min_value or value > max_value:
+                raise serializers.ValidationError({
+                    'value': (
+                        f"Unrealistic threshold for {metric_type}. "
+                        f"Expected between {min_value} and {max_value}."
+                    )
+                })
+
+        # Guard against inverted low/high pairs for core vitals.
+        if (
+            patient is not None
+            and metric_type in {'heart_rate', 'glucose'}
+            and condition in {'above', 'below'}
+            and value is not None
+        ):
+            opposite_condition = 'above' if condition == 'below' else 'below'
+            existing_qs = Threshold.objects.filter(
+                patient=patient,
+                metric_type=metric_type,
+                condition=opposite_condition,
+                is_active=True,
+            ).order_by('-created_at', '-id')
+            if self.instance is not None:
+                existing_qs = existing_qs.exclude(pk=self.instance.pk)
+
+            opposite_threshold = existing_qs.first()
+            if opposite_threshold is not None:
+                opposite_value = opposite_threshold.value
+                if condition == 'below' and value >= opposite_value:
+                    raise serializers.ValidationError({
+                        'value': f"Low threshold must be lower than active high threshold ({opposite_value})."
+                    })
+                if condition == 'above' and value <= opposite_value:
+                    raise serializers.ValidationError({
+                        'value': f"High threshold must be higher than active low threshold ({opposite_value})."
+                    })
+
+        return attrs
+
     class Meta:
         model = Threshold
         fields = "__all__"

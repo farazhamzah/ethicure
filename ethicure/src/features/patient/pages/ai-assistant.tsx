@@ -1,11 +1,10 @@
 import * as React from "react"
-import { Loader2, MessageSquare, Plus } from "lucide-react"
+import { Loader2, MessageSquare, Plus, Search } from "lucide-react"
 
 import { aiChat, getPatientProfile } from "@/lib/api"
 import type { AIChatResponse } from "@/lib/api"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 
 type ChatMessage = {
@@ -42,6 +41,7 @@ export default function AiAssistantPage() {
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [patientId, setPatientId] = React.useState<number | null>(null)
+  const [chatSearch, setChatSearch] = React.useState("")
   const messagesEndRef = React.useRef<HTMLDivElement | null>(null)
 
   function makeSession(title = "New chat"): ChatSession {
@@ -109,6 +109,17 @@ export default function AiAssistantPage() {
     const found = sessions.find((session) => session.id === activeSessionId)
     return found ?? sessions[0]
   }, [sessions, activeSessionId])
+
+  const filteredSessions = React.useMemo(() => {
+    const query = chatSearch.trim().toLowerCase()
+    if (!query) return sessions
+
+    return sessions.filter((session) => {
+      const titleMatch = session.title.toLowerCase().includes(query)
+      const messageMatch = session.messages.some((message) => message.content.toLowerCase().includes(query))
+      return titleMatch || messageMatch
+    })
+  }, [sessions, chatSearch])
 
   function updateTitleFromPrompt(session: ChatSession, prompt: string) {
     if (session.messages.some((msg) => msg.role === "user")) return session.title
@@ -192,25 +203,17 @@ export default function AiAssistantPage() {
     }
   }
 
-  const activeSummary = activeSession?.summary ?? null
-  const activeRiskFlags = activeSession?.riskFlags ?? []
-
   return (
     <div className="space-y-6">
-      <header className="rounded-2xl border bg-gradient-to-br from-slate-50 via-white to-slate-100 p-4 shadow-sm dark:from-slate-900 dark:via-slate-950 dark:to-slate-900">
-        <div className="flex flex-col gap-1">
+      <header className="space-y-2">
+        <div className="space-y-1">
           <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Assistant</p>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="space-y-1">
-              <h1 className="text-2xl font-semibold">AI Assistant</h1>
-              <p className="text-sm text-muted-foreground">Chat with a layout that feels like ChatGPT. Spin up multiple conversations for gym plans, recovery, and trend checks.</p>
-            </div>
-            <Button variant="secondary" size="sm" onClick={() => startNewChat()}>New chat</Button>
-          </div>
+          <h1 className="text-2xl font-semibold">AI Assistant</h1>
+          <p className="text-sm text-muted-foreground">Chat with a layout that feels like ChatGPT. Spin up multiple conversations for gym plans, recovery, and trend checks.</p>
         </div>
       </header>
 
-      <div className="grid items-start gap-4 lg:grid-cols-[280px,1fr,320px]">
+      <div className="grid items-start gap-4 lg:grid-cols-[280px,1fr]">
         <aside className="rounded-2xl border bg-card/80 p-4 shadow-sm">
           <div className="flex items-center justify-between gap-2">
             <div>
@@ -222,14 +225,25 @@ export default function AiAssistantPage() {
             </Button>
           </div>
 
-          <div className="mt-4 space-y-1">
-            {sessions.map((session) => {
+          <div className="relative mt-3">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={chatSearch}
+              onChange={(e) => setChatSearch(e.target.value)}
+              placeholder="Search chats"
+              className="pl-9"
+              aria-label="Search chats"
+            />
+          </div>
+
+          <div className="mt-4 max-h-[9.5rem] space-y-1 overflow-y-auto pr-1">
+            {filteredSessions.map((session) => {
               const isActive = session.id === activeSession?.id
               return (
                 <button
                   key={session.id}
                   onClick={() => setActiveSessionId(session.id)}
-                  className={`flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left text-sm transition ${isActive ? "border-primary bg-primary/5 text-primary" : "border-transparent bg-muted/40 text-foreground hover:border-border"}`}
+                  className={`flex h-12 w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left text-sm transition ${isActive ? "border-primary bg-primary/5 text-primary" : "border-transparent bg-muted/40 text-foreground hover:border-border"}`}
                 >
                   <span className="flex items-center gap-2 truncate">
                     <MessageSquare className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -239,6 +253,11 @@ export default function AiAssistantPage() {
                 </button>
               )
             })}
+            {filteredSessions.length === 0 && (
+              <p className="rounded-xl border border-dashed px-3 py-4 text-sm text-muted-foreground">
+                No chats found for "{chatSearch}".
+              </p>
+            )}
           </div>
         </aside>
 
@@ -247,7 +266,7 @@ export default function AiAssistantPage() {
             <div className="space-y-1">
               <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Conversation</p>
               <h2 className="text-lg font-semibold">{activeSession?.title || "New chat"}</h2>
-              <p className="text-xs text-muted-foreground">Shift+Enter for a new line. Enter to send.</p>
+              {/* <p className="text-xs text-muted-foreground">Shift+Enter for a new line. Enter to send.</p> */}
             </div>
             {loading && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
           </div>
@@ -323,38 +342,6 @@ export default function AiAssistantPage() {
             </div>
           </div>
         </main>
-
-        <aside className="rounded-2xl border bg-card/80 p-4 shadow-sm">
-          <Card className="border-0 bg-transparent shadow-none">
-            <CardHeader className="px-0">
-              <CardTitle>Latest signals</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 px-0 text-sm">
-              {activeRiskFlags.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {activeRiskFlags.map((flag) => (
-                    <Badge key={flag} variant="secondary">
-                      {flag.replaceAll("_", " ")}
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-muted-foreground">No current risk flags.</p>
-              )}
-
-              <div className="space-y-2">
-                <p className="text-muted-foreground">Context comes from your latest readings (heart, glucose, activity, sleep, oxygen).</p>
-                {activeSummary ? (
-                  <pre className="max-h-64 overflow-auto rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
-{JSON.stringify(activeSummary, null, 2)}
-                  </pre>
-                ) : (
-                  <p className="text-muted-foreground">Chat to load a fresh summary snapshot.</p>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </aside>
       </div>
     </div>
   )

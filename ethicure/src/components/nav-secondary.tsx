@@ -15,6 +15,7 @@ import { clearAuth } from "@/lib/utils"
 
 export function NavSecondary({
   items,
+  itemClassName,
   ...props
 }: {
   items: {
@@ -22,6 +23,7 @@ export function NavSecondary({
     url: string
     icon: Icon
   }[]
+  itemClassName?: string
 } & React.ComponentPropsWithoutRef<typeof SidebarGroup>) {
   const location = useLocation()
   const navigate = useNavigate()
@@ -40,7 +42,7 @@ export function NavSecondary({
               <SidebarMenuButton
                 isActive={isActive(item.url)}
                 aria-current={isActive(item.url) ? "page" : undefined}
-                className="flex w-full items-center gap-2"
+                className={`flex w-full items-center gap-2 ${itemClassName ?? ""}`}
                 type="button"
                 onClick={() => {
                   if (item.url === "/logout") {

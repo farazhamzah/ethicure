@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react"
-import { useNavigate, useParams } from "react-router-dom"
-import { IconArrowLeft, IconHeartbeat } from "@tabler/icons-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { useOutletContext, useParams } from "react-router-dom"
+import { IconHeartbeat } from "@tabler/icons-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import type { DoctorPatientWorkspaceContext } from "@/features/doctor/DoctorPatientWorkspaceLayout"
 import { formatName, PATIENT_DIRECTORY, riskTone } from "@/features/doctor/patients"
 import { getPatientDetail, listReadings, removeDoctorPatient, type PatientProfile, type ReadingRow } from "@/lib/api"
 
@@ -80,7 +80,8 @@ function metricsFromMock(mock: (typeof PATIENT_DIRECTORY)[number] | undefined): 
 
 export default function PatientDetailPage() {
   const { id } = useParams()
-  const navigate = useNavigate()
+  const outletContext = useOutletContext<DoctorPatientWorkspaceContext | null>()
+  const setTopActions = outletContext?.setTopActions ?? (() => {})
 
   const [patient, setPatient] = useState<PatientProfile | (typeof PATIENT_DIRECTORY)[number] | null>(null)
   const [metrics, setMetrics] = useState<MetricSnapshot>({})
@@ -181,33 +182,68 @@ export default function PatientDetailPage() {
     ]
   }, [metrics])
 
+  const handleRemove = useCallback(async () => {
+    if (!patient || !patient.id) return
+    const patientId = Number(patient.id)
+    if (!Number.isFinite(patientId)) return
+    setSaving(true)
+    setActionMessage(null)
+    setError(null)
+    try {
+      const updated = await removeDoctorPatient(patientId)
+      setPatient(updated)
+      setActionMessage("Patient removed from your roster.")
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to remove patient"
+      setError(message)
+    } finally {
+      setSaving(false)
+    }
+  }, [patient])
+
+  useEffect(() => {
+    if (!patient) {
+      setTopActions(null)
+      return
+    }
+
+    const assignedToMe = "doctor" in patient && typeof patient.doctor === "number" && patient.doctor !== null
+    if (!assignedToMe) {
+      setTopActions(null)
+      return
+    }
+
+    setTopActions(
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={handleRemove}
+        disabled={saving}
+      >
+        Remove patient
+      </Button>
+    )
+
+    return () => {
+      setTopActions(null)
+    }
+  }, [handleRemove, patient, saving, setTopActions])
+
   if (loading) {
     return (
-      <div className="space-y-4 p-4">
-        <Button variant="ghost" onClick={() => navigate(-1)} className="inline-flex items-center gap-2">
-          <IconArrowLeft className="h-4 w-4" />
-          Back
-        </Button>
-        <Card>
-          <CardContent className="p-6 text-muted-foreground">Loading patient…</CardContent>
-        </Card>
-      </div>
+      <Card>
+        <CardContent className="p-6 text-muted-foreground">Loading patient…</CardContent>
+      </Card>
     )
   }
 
   if (!patient) {
     return (
-      <div className="space-y-4 p-4">
-        <Button variant="ghost" onClick={() => navigate(-1)} className="inline-flex items-center gap-2">
-          <IconArrowLeft className="h-4 w-4" />
-          Back
-        </Button>
-        <Card>
-          <CardContent className="p-6 text-muted-foreground">
-            {error || "Patient not found."}
-          </CardContent>
-        </Card>
-      </div>
+      <Card>
+        <CardContent className="p-6 text-muted-foreground">
+          {error || "Patient not found."}
+        </CardContent>
+      </Card>
     )
   }
 
@@ -220,56 +256,20 @@ export default function PatientDetailPage() {
     username: (patient as any).username,
   })
 
-  const assignedToMe = typeof patient.doctor === "number" && patient.doctor !== null
-
-  const handleRemove = async () => {
-    if (!patient || !patient.id) return
-    setSaving(true)
-    setActionMessage(null)
-    setError(null)
-    try {
-      const updated = await removeDoctorPatient(patient.id)
-      setPatient(updated)
-      setActionMessage("Patient removed from your roster.")
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unable to remove patient"
-      setError(message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
   return (
-    <div className="flex flex-col gap-6 px-4 lg:px-6">
-      <div className="flex items-center justify-between gap-3">
-        <Button variant="ghost" onClick={() => navigate(-1)} className="inline-flex items-center gap-2">
-          <IconArrowLeft className="h-4 w-4" />
-          Back
-        </Button>
-        <div className="flex items-center gap-3">
-          {assignedToMe ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleRemove}
-              disabled={saving}
-            >
-              Remove patient
-            </Button>
-          ) : null}
-          <Badge variant="outline" className={riskTone["moderate"]}>
-            Risk TBD
-          </Badge>
-        </div>
-      </div>
-
+    <div className="flex flex-col gap-6">
       <Card>
-        <CardHeader className="space-y-1">
-          <div className="text-sm text-muted-foreground">{patient.id}</div>
-          <CardTitle className="text-2xl font-semibold">{patientName}</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            {patient.age ? `${patient.age} yrs` : "Age n/a"} • {patient.gender || "Gender n/a"} • Location n/a
-          </p>
+        <CardHeader className="space-y-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="text-sm text-muted-foreground">Profile</div>
+              <CardTitle className="text-2xl font-semibold">{patientName}</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                {patient.age ? `${patient.age} yrs` : "Age n/a"} • {patient.gender || "Gender n/a"} • Location n/a
+              </p>
+            </div>
+            <div className="text-sm text-muted-foreground">Patient ID {patient.id}</div>
+          </div>
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
           <div className="flex items-center gap-2">
@@ -285,26 +285,29 @@ export default function PatientDetailPage() {
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle>Key metrics</CardTitle>
+        <CardHeader className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>Key metrics</CardTitle>
+            <Badge variant="outline" className={riskTone["moderate"]}>
+              Risk TBD
+            </Badge>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Latest clinical snapshot from readings_draft.
+          </p>
         </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Metric</TableHead>
-                <TableHead>Value</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {displayRows.map((row) => (
-                <TableRow key={row.label}>
-                  <TableCell className="font-medium">{row.label}</TableCell>
-                  <TableCell>{row.value}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {displayRows.map((row) => (
+              <div
+                key={row.label}
+                className="rounded-xl border border-border/70 bg-gradient-to-b from-background to-muted/30 p-4"
+              >
+                <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{row.label}</p>
+                <p className="mt-2 text-lg font-semibold text-foreground">{row.value}</p>
+              </div>
+            ))}
+          </div>
         </CardContent>
       </Card>
     </div>

@@ -29,6 +29,7 @@ const navMain = [
     title: "Doctor Home",
     url: "/doctor",
     icon: IconDashboard,
+    exact: true,
   },
 ]
 
@@ -92,6 +93,9 @@ export function DoctorSidebar({ ...props }: React.ComponentProps<typeof Sidebar>
     }
   }, [])
 
+  const doctorNavItemClassName =
+    "hover:bg-primary/90 hover:text-primary-foreground active:bg-primary/90 active:text-primary-foreground data-active:bg-primary data-active:text-primary-foreground"
+
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
@@ -107,8 +111,16 @@ export function DoctorSidebar({ ...props }: React.ComponentProps<typeof Sidebar>
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={navMain} />
-        <NavSecondary items={navSecondary} className="mt-auto" />
+        <NavMain
+          items={navMain}
+          showQuickActions={false}
+          itemClassName={doctorNavItemClassName}
+        />
+        <NavSecondary
+          items={navSecondary}
+          itemClassName={doctorNavItemClassName}
+          className="mt-auto"
+        />
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>

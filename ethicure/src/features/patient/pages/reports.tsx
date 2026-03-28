@@ -210,6 +210,17 @@ type ReportPdfPayload = {
   generated_at: string
 }
 
+type ReportsPageProps = {
+  patientId?: number
+  title?: string
+  description?: string
+}
+
+type BackendDevice = {
+  device_type: string
+  status: string
+}
+
 const METRIC_LABELS: Record<string, string> = {
   heart_rate: "Heart Rate",
   heart_hrv_ms: "Heart HRV (ms)",
@@ -253,7 +264,53 @@ const formatNumber = (value: number | null | undefined) => {
   return Number(value).toFixed(1)
 }
 
-export default function ReportsPage() {
+function buildConnectedMetricSet(devices: BackendDevice[]): Set<string> {
+  const connected = new Set<string>()
+  const connectedStatuses = new Set(["online", "syncing", "connected", "active"])
+  const deviceToMetric: Record<string, string> = {
+    heart: "heart_rate",
+    heart_rate: "heart_rate",
+    blood_pressure: "blood_pressure",
+    bp: "blood_pressure",
+    bp_systolic: "blood_pressure",
+    bp_diastolic: "blood_pressure",
+    glucose: "glucose",
+    oxygen: "oxygen",
+    steps: "steps",
+    step_count: "steps",
+    calories: "calories",
+    sleep: "sleep",
+    smart_watch: "smart_watch",
+    watch: "smart_watch",
+  }
+
+  for (const device of devices) {
+    const typeKey = String(device?.device_type || "").trim().toLowerCase()
+    const statusKey = String(device?.status || "").trim().toLowerCase()
+    if (!typeKey || !connectedStatuses.has(statusKey)) continue
+    const metricKey = deviceToMetric[typeKey]
+    if (metricKey) connected.add(metricKey)
+  }
+
+  return connected
+}
+
+function isMetricConnected(metricId: MetricId, connected: Set<string>): boolean {
+  if (metricId === "heart-rate") return connected.has("heart_rate")
+  if (metricId === "blood-pressure") return connected.has("blood_pressure")
+  if (metricId === "glucose") return connected.has("glucose")
+  if (metricId === "oxygen") return connected.has("oxygen")
+  if (metricId === "steps") return connected.has("steps")
+  if (metricId === "calories") return connected.has("calories")
+  if (metricId === "sleep") return connected.has("sleep") || connected.has("smart_watch")
+  return false
+}
+
+export default function ReportsPage({
+  patientId,
+  title = "Reports",
+  description = "Structured, clinical reporting with focused metric selection and export options.",
+}: ReportsPageProps = {}) {
   const [dateRange, setDateRange] = React.useState<DateRange | undefined>(() => {
     const to = new Date()
     const from = subDays(to, 29)
@@ -280,6 +337,7 @@ export default function ReportsPage() {
   const [reportData, setReportData] = React.useState<ReportPdfPayload | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [shareOpen, setShareOpen] = React.useState(false)
+  const [connectedMetricKeys, setConnectedMetricKeys] = React.useState<Set<string>>(new Set())
 
   const rangeLabel = React.useMemo(() => {
     if (dateRange?.from && dateRange.to) {
@@ -312,6 +370,51 @@ export default function ReportsPage() {
     }
   }, [pdfUrl])
 
+  React.useEffect(() => {
+    let cancelled = false
+
+    async function loadConnectedDevices() {
+      try {
+        const token = typeof window !== "undefined" ? window.localStorage.getItem("accessToken") : null
+        const response = await fetch(`${API_BASE_URL}/api/devices/`, {
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        })
+
+        if (!response.ok) {
+          if (!cancelled) setConnectedMetricKeys(new Set())
+          return
+        }
+
+        const payload = await response.json().catch(() => [])
+        const devices = Array.isArray(payload) ? (payload as BackendDevice[]) : []
+        if (!cancelled) setConnectedMetricKeys(buildConnectedMetricSet(devices))
+      } catch {
+        if (!cancelled) setConnectedMetricKeys(new Set())
+      }
+    }
+
+    loadConnectedDevices()
+    return () => {
+      cancelled = true
+    }
+  }, [patientId])
+
+  React.useEffect(() => {
+    // Enforce "selectable only if connected" by removing selections for disconnected metrics.
+    setSelectedMetrics((prev) => {
+      const next = { ...prev }
+      for (const metric of METRICS) {
+        if (!isMetricConnected(metric.id, connectedMetricKeys)) {
+          next[metric.id] = new Set<SubMetricId>()
+        }
+      }
+      return next
+    })
+  }, [connectedMetricKeys])
+
   const toggleSection = (id: MetricId) => {
     setOpenSections((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
@@ -319,6 +422,7 @@ export default function ReportsPage() {
   }
 
   const handleParentToggle = (metric: MetricDefinition, checked: boolean) => {
+    if (!isMetricConnected(metric.id, connectedMetricKeys)) return
     setSelectedMetrics((prev) => {
       const next = new Set<SubMetricId>()
       if (checked) {
@@ -334,6 +438,7 @@ export default function ReportsPage() {
     subId: SubMetricId,
     checked: boolean
   ) => {
+    if (!isMetricConnected(metric.id, connectedMetricKeys)) return
     setSelectedMetrics((prev) => {
       const current = new Set(prev[metric.id] ?? [])
       if (checked) {
@@ -771,14 +876,15 @@ export default function ReportsPage() {
       const startDate = format(dateRange.from, "yyyy-MM-dd")
       const endDate = format(dateRange.to ?? dateRange.from, "yyyy-MM-dd")
 
-      const patientId = window.localStorage.getItem("patientId")
+      const scopedPatientId =
+        patientId ?? Number(window.localStorage.getItem("patientId") || "")
       const createPayload: Record<string, unknown> = {
         title: `Health Report (${rangeLabel})`,
         report_type: "custom",
         start_date: startDate,
         end_date: endDate,
       }
-      if (patientId) createPayload.patient = Number(patientId)
+      if (scopedPatientId) createPayload.patient = scopedPatientId
 
       const createResponse = await fetch(`${API_BASE_URL}/api/reports/`, {
         method: "POST",
@@ -865,15 +971,16 @@ export default function ReportsPage() {
         </p>
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-1">
-            <h1 className="text-2xl font-semibold">Reports</h1>
+            <h1 className="text-2xl font-semibold">{title}</h1>
             <p className="text-sm text-muted-foreground">
-              Structured, clinical reporting with focused metric selection and export options.
+              {description}
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button
               variant="outline"
               className="gap-2"
+              data-testid="reports-generate-pdf"
               disabled={isGenerating || !activeMetrics.length}
               onClick={generatePdf}
             >
@@ -896,6 +1003,7 @@ export default function ReportsPage() {
             <Button
               variant="secondary"
               className="gap-2"
+              data-testid="reports-share"
               disabled={!pdfUrl}
               onClick={() => setShareOpen(true)}
             >
@@ -924,6 +1032,7 @@ export default function ReportsPage() {
             <CardContent className="space-y-2">
               {METRICS.map((metric) => {
                 const parentChecked = parentState(metric)
+                const metricConnected = isMetricConnected(metric.id, connectedMetricKeys)
 
                 return (
                   <Collapsible
@@ -936,11 +1045,12 @@ export default function ReportsPage() {
                       className="flex cursor-pointer items-start justify-between gap-3"
                       onClick={() => toggleSection(metric.id)}
                     >
-                      <div className="flex flex-1 items-start gap-3">
+                      <div className={cn("flex flex-1 items-start gap-3", !metricConnected && "opacity-60")}>
                         <Checkbox
                           aria-label={`Select ${metric.label}`}
                           checked={parentChecked === true}
                           indeterminate={parentChecked === "mixed"}
+                          disabled={!metricConnected}
                           onClick={(event) => event.stopPropagation()}
                           onCheckedChange={(checked) =>
                             handleParentToggle(metric, Boolean(checked))
@@ -954,7 +1064,9 @@ export default function ReportsPage() {
                             {metric.label}
                           </div>
                           <p className="text-xs text-muted-foreground">
-                            {metric.description}
+                            {metricConnected
+                              ? metric.description
+                              : "No connected device for this metric."}
                           </p>
                         </div>
                       </div>
@@ -971,11 +1083,15 @@ export default function ReportsPage() {
                         return (
                           <label
                             key={sub.id}
-                            className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 hover:bg-muted"
+                            className={cn(
+                              "flex items-center justify-between gap-3 rounded-md px-2 py-1.5",
+                              metricConnected ? "hover:bg-muted" : "opacity-60"
+                            )}
                           >
                             <div className="flex items-center gap-2 text-sm">
                               <Checkbox
                                 checked={Boolean(isChecked)}
+                                disabled={!metricConnected}
                                 onClick={(event) => event.stopPropagation()}
                                 onCheckedChange={(checked) =>
                                   handleSubToggle(metric, sub.id, Boolean(checked))
@@ -1001,6 +1117,7 @@ export default function ReportsPage() {
             <CardContent className="space-y-3">
               <Popover>
                 <PopoverTrigger
+                  data-testid="reports-date-trigger"
                   className={cn(
                     buttonVariants({ variant: "outline" }),
                     "w-full justify-start gap-2 text-left font-normal",
@@ -1014,6 +1131,7 @@ export default function ReportsPage() {
                 </PopoverTrigger>
                 <PopoverContent className="w-auto p-0" align="start">
                   <Calendar
+                    data-testid="reports-calendar"
                     initialFocus
                     mode="range"
                     numberOfMonths={2}
@@ -1095,6 +1213,7 @@ export default function ReportsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
       </div>
     </div>
   )

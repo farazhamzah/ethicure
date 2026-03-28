@@ -1,0 +1,129 @@
+# Ethicure - Health Monitoring Application
+
+## 1. Prerequisites
+
+Before you begin, ensure that you have the following installed on your development machine:
+
+- Node.js (v18 or later recommended)
+- npm (comes with Node.js)
+- Python (v3.10 or later)
+- PostgreSQL (local instance or cloud-hosted)
+- Git (optional, for version control)
+
+
+## 2. Clone the Repository
+
+If you haven't already cloned the project, open your terminal and run:
+
+HTTPS:
+git clone https://github.com/your-org/ethicure.git   ////// add
+
+***************************************************
+NEED THE ACTUAL URL^ - FH
+***************************************************
+
+SSH:
+git clone git@github.com:your-org/ethicure.git
+
+Then navigate to the project directory:
+cd ethicure
+
+
+## 3. Install Frontend Dependencies
+
+Inside the ethicure/ directory, run the following command to install all required npm packages:
+
+npm install
+
+This will install dependencies such as React, Vite, React Router, Recharts, Tailwind CSS, shadcn/ui components, and other libraries used in the project.
+
+And just to be safe, run:
+1. npm i react-router-dom
+2. npm i recharts
+3. npm i lucide-react
+4. npm i tailwindcss
+5. npm i zod
+
+This is because depending on the IDE used and devices, some packages may not get installed when running the general npm install in the terminal.
+
+
+## 4. Install Backend Dependencies
+
+Navigate to the backend directory:
+cd ../backend
+
+Create and activate a virtual environment:
+python -m venv .venv
+source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+
+Install Python dependencies:
+pip install -r requirements.txt
+
+
+## 5. Environment Configuration
+
+Create a .env.local file in the ethicure/ frontend directory with your API configuration:
+VITE_API_URL=http://localhost:8000/api
+
+Configure your backend settings in backend/health_backend/settings.py with your database credentials.
+
+
+## 6. Running the Web Application
+
+Start the Backend Server
+
+In the backend/ directory with your virtual environment activated, run:
+python manage.py runserver
+
+You should see:
+Starting development server at http://127.0.0.1:8000/
+
+Start the Frontend Development Server
+
+In the ethicure/ directory, run:
+npm run dev
+
+or
+
+npm run preview
+
+The development server will start and you should see:
+VITE v5.x.x  ready in xxx ms
+
+  Local:   http://localhost:5173/
+  Network: use --host to expose
+
+Click on the localhost link and it will redirect you to the web application.
+
+
+## 7. Troubleshooting
+
+Additionally, make sure that no task is running on your localhost port 5173 (frontend) or 8000 (backend), otherwise you will receive an error message and will not be able to run the program. In case of error, here is what you should do:
+
+On Linux/Mac:
+1. In the terminal, run:
+   lsof -i :5173
+
+2. After that, get the task PID from the result after running the first command, and run:
+   kill -9 <PID>
+
+On Windows:
+1. In the terminal, run:
+   netstat -ano | findstr :5173
+
+2. After that, get the task PID from the result after running the first command, and run:
+   taskkill /PID <the PID> /F
+
+
+## 8. Available Scripts
+
+| Command                  | Description                |
+|--------------------------|----------------------------|
+| npm run dev              | Start development server   |
+| npm run build            | Build for production       |
+| npm run preview          | Preview production build   |
+| npm run lint             | Run ESLint                 |
+| npm run test:component   | Run component tests        |
+
+
+By following this guide, you should have Ethicure running locally. We hope you enjoy and have a pleasant experience exploring Ethicure. Thank you!

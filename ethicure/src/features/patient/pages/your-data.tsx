@@ -37,11 +37,21 @@ import {
   ToggleGroup,
   ToggleGroupItem,
 } from "@/components/ui/toggle-group"
-import { listReadings, type ReadingRow } from "@/lib/api"
+import { API_BASE_URL, listReadings, type ReadingRow } from "@/lib/api"
 
 type MetricType = "heart_rate" | "bp_systolic" | "bp_diastolic" | "glucose" | "steps" | "calories" | "oxygen"
 
 type TrendPoint = { date: string; value: number; target?: number }
+type BackendDevice = {
+  device_type: string
+  status: string
+}
+
+type YourDataPageProps = {
+  patientId?: number
+  title?: string
+  subtitle?: string
+}
 
 type MetricLeaf = {
   id: MetricType
@@ -177,7 +187,44 @@ const TIME_RANGES: Record<string, number> = {
   yearly: 365,
 }
 
-export default function YourDataPage() {
+function buildConnectedMetricSet(devices: BackendDevice[]): Set<string> {
+  const connected = new Set<string>()
+  const connectedStatuses = new Set(["online", "syncing", "connected", "active"])
+  const deviceToMetric: Record<string, string> = {
+    heart: "heart_rate",
+    heart_rate: "heart_rate",
+    blood_pressure: "blood_pressure",
+    bp: "blood_pressure",
+    bp_systolic: "blood_pressure",
+    bp_diastolic: "blood_pressure",
+    glucose: "glucose",
+    oxygen: "oxygen",
+    steps: "steps",
+    step_count: "steps",
+    calories: "calories",
+  }
+
+  for (const device of devices) {
+    const typeKey = String(device?.device_type || "").trim().toLowerCase()
+    const statusKey = String(device?.status || "").trim().toLowerCase()
+    if (!typeKey || !connectedStatuses.has(statusKey)) continue
+    const metricKey = deviceToMetric[typeKey]
+    if (metricKey) connected.add(metricKey)
+  }
+
+  return connected
+}
+
+function connectionKeyForLeaf(metricId: MetricType): string {
+  if (metricId === "bp_systolic" || metricId === "bp_diastolic") return "blood_pressure"
+  return metricId
+}
+
+export default function YourDataPage({
+  patientId,
+  title = "Your Data",
+  subtitle = "Pick a metric and sub-metric to see the trajectory over time.",
+}: YourDataPageProps = {}) {
   const [groupId, setGroupId] = React.useState<string>(DEFAULT_GROUP_ID)
   const [leafId, setLeafId] = React.useState<string>(DEFAULT_LEAF_ID)
   const [timeRange, setTimeRange] = React.useState<keyof typeof TIME_RANGES>("monthly")
@@ -190,6 +237,8 @@ export default function YourDataPage() {
     calories: [],
     oxygen: [],
   }))
+  const [readingsRows, setReadingsRows] = React.useState<ReadingRow[]>([])
+  const [connectedMetricKeys, setConnectedMetricKeys] = React.useState<Set<string>>(new Set())
   const [loading, setLoading] = React.useState<boolean>(true)
   const [error, setError] = React.useState<string | null>(null)
 
@@ -208,14 +257,37 @@ export default function YourDataPage() {
   )
 
   const availableLeaves = React.useMemo(() => currentGroup?.children ?? [], [currentGroup])
+  const groupHasConnectedLeaves = React.useCallback(
+    (group: MetricGroup) => group.children.some((leaf) => connectedMetricKeys.has(connectionKeyForLeaf(leaf.id))),
+    [connectedMetricKeys]
+  )
+
+  const firstConnectedLeaf = React.useMemo(() => {
+    for (const group of METRIC_GROUPS) {
+      const leaf = group.children.find((item) => connectedMetricKeys.has(connectionKeyForLeaf(item.id)))
+      if (leaf) return { groupId: group.id, leafId: leaf.id }
+    }
+    return null
+  }, [connectedMetricKeys])
 
   React.useEffect(() => {
-    if (availableLeaves.length && availableLeaves.find((leaf) => leaf.id === leafId)) {
+    const isCurrentConnected = availableLeaves.some(
+      (leaf) => leaf.id === leafId && connectedMetricKeys.has(connectionKeyForLeaf(leaf.id))
+    )
+
+    if (availableLeaves.length && isCurrentConnected) {
       return
     }
 
-    if (availableLeaves.length) {
-      setLeafId(availableLeaves[0].id)
+    const firstConnectedInGroup = availableLeaves.find((leaf) => connectedMetricKeys.has(connectionKeyForLeaf(leaf.id)))
+    if (firstConnectedInGroup) {
+      setLeafId(firstConnectedInGroup.id)
+      return
+    }
+
+    if (firstConnectedLeaf) {
+      setGroupId(firstConnectedLeaf.groupId)
+      setLeafId(firstConnectedLeaf.leafId)
       return
     }
 
@@ -223,7 +295,7 @@ export default function YourDataPage() {
       setGroupId(firstChartableLeaf.groupId)
       setLeafId(firstChartableLeaf.leafId)
     }
-  }, [availableLeaves, leafId, firstChartableLeaf])
+  }, [availableLeaves, leafId, firstChartableLeaf, firstConnectedLeaf, connectedMetricKeys])
 
   const selectedLeaf = React.useMemo(
     () => availableLeaves.find((leaf) => leaf.id === leafId) ?? availableLeaves[0],
@@ -238,9 +310,10 @@ export default function YourDataPage() {
       setError(null)
       try {
         const storedPatientId =
-          typeof window !== "undefined"
+          patientId ??
+          (typeof window !== "undefined"
             ? Number(window.localStorage.getItem("patientId") || "")
-            : undefined
+            : undefined)
 
         if (!storedPatientId) {
           throw new Error("Missing patient session. Please sign in again.")
@@ -248,14 +321,33 @@ export default function YourDataPage() {
 
         const since = new Date()
         since.setDate(since.getDate() - 365)
-        const rows = await listReadings({
+        const token = typeof window !== "undefined" ? window.localStorage.getItem("accessToken") : null
+
+        const rowsPromise = listReadings({
           patientId: storedPatientId,
           startDate: since.toISOString().slice(0, 10),
-          limit: 5000,
+          // readings are flattened per metric; a year of hourly data can exceed 60k rows
+          limit: 70000,
         })
+        const devicesPromise = fetch(`${API_BASE_URL}/api/devices/`, {
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        })
+          .then(async (response) => {
+            if (!response.ok) return [] as BackendDevice[]
+            const payload = await response.json().catch(() => [])
+            return Array.isArray(payload) ? (payload as BackendDevice[]) : ([] as BackendDevice[])
+          })
+          .catch(() => [] as BackendDevice[])
+
+        const [rows, devices] = await Promise.all([rowsPromise, devicesPromise])
 
         if (cancelled) return
+        setReadingsRows(rows)
         setTrendMap(buildTrendMap(rows))
+        setConnectedMetricKeys(buildConnectedMetricSet(devices))
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load data")
       } finally {
@@ -267,10 +359,73 @@ export default function YourDataPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [patientId])
 
   const filteredTrend = React.useMemo(() => {
     if (!selectedLeaf) return []
+    if (!connectedMetricKeys.has(connectionKeyForLeaf(selectedLeaf.id))) return []
+
+    if (timeRange === "daily") {
+      const now = new Date()
+      const cutoffMs = now.getTime() - 24 * 60 * 60 * 1000
+      const hourly = new Map<string, number[]>()
+      const allValues: number[] = []
+      const historicalValues: number[] = []
+
+      for (const row of readingsRows) {
+        if (row.metric_type !== selectedLeaf.id) continue
+        if (!row.recorded_at) continue
+        const ts = new Date(row.recorded_at)
+        if (!Number.isFinite(ts.getTime()) || ts.getTime() < cutoffMs) continue
+
+        const num = toNumber(row.value)
+        if (num === null) continue
+        historicalValues.push(num)
+
+        if (ts.getTime() < cutoffMs) continue
+        allValues.push(num)
+
+        ts.setMinutes(0, 0, 0)
+        const key = ts.toISOString()
+        const points = hourly.get(key) ?? []
+        points.push(num)
+        hourly.set(key, points)
+      }
+
+      const hourAverage = new Map<string, number>()
+      for (const [date, values] of hourly.entries()) {
+        if (!values.length) continue
+        hourAverage.set(date, values.reduce((sum, val) => sum + val, 0) / values.length)
+      }
+
+      const fallbackAverage = allValues.length
+        ? allValues.reduce((sum, val) => sum + val, 0) / allValues.length
+        : historicalValues.length
+          ? historicalValues.reduce((sum, val) => sum + val, 0) / historicalValues.length
+          : null
+
+      const series: TrendPoint[] = []
+      const anchor = new Date(now)
+      anchor.setMinutes(0, 0, 0)
+
+      for (let i = 23; i >= 0; i -= 1) {
+        const slot = new Date(anchor)
+        slot.setHours(anchor.getHours() - i)
+        const key = slot.toISOString()
+        const avg = hourAverage.get(key)
+        const value = avg ?? fallbackAverage
+        if (value === null) continue
+
+        series.push({
+          date: key,
+          value,
+          target: selectedLeaf.target,
+        })
+      }
+
+      if (series.length) return series
+    }
+
     const series = trendMap[selectedLeaf.id] ?? []
     if (!series.length) return []
 
@@ -282,7 +437,12 @@ export default function YourDataPage() {
     const within = series.filter((row) => new Date(row.date) >= cutoff)
     const chosen = within.length ? within : series.slice(-14)
     return chosen.map((row) => ({ ...row, target: selectedLeaf.target }))
-  }, [selectedLeaf, timeRange, trendMap])
+  }, [selectedLeaf, timeRange, trendMap, readingsRows, connectedMetricKeys])
+
+  const selectedLeafConnected = React.useMemo(
+    () => Boolean(selectedLeaf && connectedMetricKeys.has(connectionKeyForLeaf(selectedLeaf.id))),
+    [selectedLeaf, connectedMetricKeys]
+  )
 
   const currentValue = filteredTrend.at(-1)?.value
   const startingValue = filteredTrend[0]?.value
@@ -309,9 +469,9 @@ export default function YourDataPage() {
       <header className="space-y-2">
         <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Insights</p>
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">Your Data</h1>
+          <h1 className="text-2xl font-semibold">{title}</h1>
           <p className="text-sm text-muted-foreground">
-            Pick a metric and sub-metric to see the trajectory over time.
+            {subtitle}
           </p>
         </div>
         {error ? <p className="text-destructive text-sm">{error}</p> : null}
@@ -336,7 +496,7 @@ export default function YourDataPage() {
                 </SelectTrigger>
                 <SelectContent className="rounded-xl">
                   {METRIC_GROUPS.map((group) => (
-                    <SelectItem key={group.id} value={group.id} className="rounded-lg">
+                    <SelectItem key={group.id} value={group.id} className="rounded-lg" disabled={!groupHasConnectedLeaves(group)}>
                       {group.label}
                     </SelectItem>
                   ))}
@@ -352,7 +512,12 @@ export default function YourDataPage() {
                 </SelectTrigger>
                 <SelectContent className="rounded-xl">
                   {availableLeaves.map((leaf) => (
-                    <SelectItem key={leaf.id} value={leaf.id} className="rounded-lg">
+                    <SelectItem
+                      key={leaf.id}
+                      value={leaf.id}
+                      className="rounded-lg"
+                      disabled={!connectedMetricKeys.has(connectionKeyForLeaf(leaf.id))}
+                    >
                       {leaf.label}
                     </SelectItem>
                   ))}
@@ -361,7 +526,7 @@ export default function YourDataPage() {
               <ToggleGroup
                 value={[timeRange]}
                 onValueChange={(values) => {
-                  const next = values[0]
+                  const next = Array.isArray(values) ? values[0] : values
                   if (next) setTimeRange(next as keyof typeof TIME_RANGES)
                 }}
                 variant="outline"
@@ -396,9 +561,9 @@ export default function YourDataPage() {
             <InsightPill
               title="Current"
               value={
-                currentValue !== undefined
+                selectedLeafConnected && currentValue !== undefined
                   ? formatValue(currentValue, selectedLeaf?.unit ?? "")
-                  : "--"
+                  : "No device connected"
               }
               icon={<Sparkles className="h-4 w-4" />}
             />
@@ -417,7 +582,7 @@ export default function YourDataPage() {
             <InsightPill
               title="Target"
               value={
-                selectedLeaf?.target !== undefined
+                selectedLeafConnected && selectedLeaf?.target !== undefined
                   ? formatValue(selectedLeaf.target as number, selectedLeaf.unit ?? "")
                   : "Not set"
               }
@@ -430,7 +595,13 @@ export default function YourDataPage() {
         </CardHeader>
         <CardContent className="px-2 pb-6 sm:px-6">
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading data…</p>
+            <div className="flex h-[260px] items-center justify-center rounded-xl bg-muted/30 sm:h-[320px]">
+              <span className="inline-block h-10 w-10 animate-[spin_0.55s_linear_infinite] rounded-full border-4 border-muted-foreground/25 border-t-primary" />
+            </div>
+          ) : !selectedLeafConnected ? (
+            <div className="flex h-[260px] items-center justify-center rounded-xl bg-muted/30 text-sm text-muted-foreground sm:h-[320px]">
+              No device connected
+            </div>
           ) : !filteredTrend.length ? (
             <p className="text-sm text-muted-foreground">No readings yet in this range.</p>
           ) : (
@@ -451,11 +622,12 @@ export default function YourDataPage() {
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  minTickGap={24}
+                  minTickGap={timeRange === "daily" ? 8 : 24}
+                  interval={timeRange === "daily" ? 2 : "preserveEnd"}
                   tickFormatter={(value) => {
                     const date = new Date(value)
                     if (timeRange === "daily") {
-                      return date.toLocaleTimeString("en-US", { hour: "numeric" })
+                      return date.toLocaleTimeString("en-US", { hour: "numeric", hour12: true })
                     }
                     if (timeRange === "yearly") {
                       return date.toLocaleDateString("en-US", { month: "short" })
@@ -483,11 +655,18 @@ export default function YourDataPage() {
                   content={
                     <ChartTooltipContent
                       labelFormatter={(value) =>
-                        new Date(value).toLocaleDateString("en-US", {
-                          month: "short",
-                          day: timeRange === "yearly" ? undefined : "numeric",
-                          hour: timeRange === "daily" ? "numeric" : undefined,
-                        })
+                        timeRange === "daily"
+                          ? new Date(value).toLocaleString("en-US", {
+                              weekday: "short",
+                              month: "short",
+                              day: "numeric",
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })
+                          : new Date(value).toLocaleDateString("en-US", {
+                              month: "short",
+                              day: timeRange === "yearly" ? undefined : "numeric",
+                            })
                       }
                       formatter={(value) => formatValue(Number(value), selectedLeaf?.unit ?? "")}
                     />

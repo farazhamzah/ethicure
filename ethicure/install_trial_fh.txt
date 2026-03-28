@@ -1,0 +1,187 @@
+Ethicure local setup
+
+--------------------------------------------------
+0) What this project looks like
+--------------------------------------------------
+Folder layout from project root:
+- ethicure/   (frontend React + Vite)
+- backend/    (Django API)
+
+So we run 2 servers:
+- Backend: http://127.0.0.1:8000
+- Frontend: http://localhost:5173
+
+
+--------------------------------------------------
+1) Requirements (install these first)
+--------------------------------------------------
+System requirements:
+- Git
+- Node.js 18+ (npm comes with it)
+- Python 3.10+ (3.12 is fine)
+- PostgreSQL (running locally)
+
+Frontend deps are in package.json (npm install gets them).
+Backend does NOT currently have a requirements.txt in repo, so we install Python deps manually (steps below).
+
+
+--------------------------------------------------
+2) Clone repo
+--------------------------------------------------
+HTTPS:
+git clone https://github.com/farazhamzah/ethicure.git
+
+SSH:
+git clone git@github.com:farazhamzah/ethicure.git
+
+Then:
+cd ethicure
+
+
+--------------------------------------------------
+3) Frontend install (React app)
+--------------------------------------------------
+cd ethicure
+npm install
+
+That should install all frontend dependencies from package.json.
+Main ones include React, React Router, Recharts, Tailwind, lucide-react, zod, etc.
+
+If your machine acts weird and misses packages, run this too:
+npm i react-router-dom recharts lucide-react tailwindcss zod
+
+Frontend env file:
+Create or edit ethicure/.env.local and set:
+VITE_API_BASE_URL=http://127.0.0.1:8000
+
+Important: use VITE_API_BASE_URL (not VITE_API_URL).
+
+
+--------------------------------------------------
+4) Backend install (Django API)
+--------------------------------------------------
+From project root:
+cd backend
+
+Create venv:
+python -m venv .venv
+
+Activate venv:
+Linux/Mac:
+source .venv/bin/activate
+
+Windows:
+.venv\Scripts\activate
+
+Install backend Python dependencies:
+pip install Django==4.2.27 djangorestframework==3.16.1 djangorestframework-simplejwt==5.5.1 django-cors-headers==4.9.0 psycopg2-binary==2.9.11 PyJWT==2.10.1
+
+Optional but recommended for AI endpoints:
+pip install openai
+
+Why optional?
+- If you will use AI chat/recommendations endpoints, install openai and set OPENAI_API_KEY.
+- If you do not use AI features, app can still run for normal non-AI flows.
+
+
+--------------------------------------------------
+5) Database setup (Postgres)
+--------------------------------------------------
+Backend is configured for Postgres in backend/health_backend/settings.py.
+Default values currently point to:
+- DB name: health_app
+- user: health_admin
+- host: 127.0.0.1
+- port: 5432
+
+Make sure your Postgres has that DB/user (or edit settings.py to your own values).
+
+Then run migrations:
+cd backend
+source .venv/bin/activate   (or Windows activate command)
+python manage.py migrate
+
+(If you need an admin user)
+python manage.py createsuperuser
+
+
+--------------------------------------------------
+6) OpenAI key
+--------------------------------------------------
+- For basic app usage: not required.
+- For AI endpoints (chat/recommendations): yes, set it.
+
+Linux/Mac temporary export:
+export OPENAI_API_KEY="your_real_key_here"
+
+Windows PowerShell:
+$env:OPENAI_API_KEY="your_real_key_here"
+
+You can also put it in your shell profile if you want it permanent.
+
+
+--------------------------------------------------
+7) Run backend + frontend
+--------------------------------------------------
+Terminal 1 (backend):
+cd backend
+source .venv/bin/activate
+python manage.py runserver
+
+Terminal 2 (frontend):
+cd ethicure
+npm run dev
+
+Open:
+http://localhost:5173
+
+
+--------------------------------------------------
+8) Debug mode note
+--------------------------------------------------
+For Django debugging, use:
+DEBUG=True
+in backend/health_backend/settings.py.
+
+It is already True right now in this repo.
+
+Note: people sometimes write "/debug=True" in notes, but in Django the actual setting is DEBUG=True (without slash).
+
+
+--------------------------------------------------
+9) Quick troubleshooting
+--------------------------------------------------
+If port 5173 is busy:
+Linux/Mac:
+lsof -i :5173
+kill <PID>
+
+If still stuck, force kill:
+kill -9 <PID>
+
+If port 8000 is busy:
+lsof -i :8000
+kill <PID>
+
+Windows:
+netstat -ano | findstr :5173
+taskkill /PID <PID> /F
+
+If backend crashes with import errors:
+- make sure venv is activated
+- rerun pip install command from section 4
+
+If frontend cannot call API:
+- check ethicure/.env.local has VITE_API_BASE_URL
+- restart npm run dev after env changes
+
+
+--------------------------------------------------
+10) Useful frontend scripts
+--------------------------------------------------
+From ethicure/:
+- npm run dev              -> start dev server
+- npm run build            -> production build
+- npm run preview          -> preview built app
+- npm run lint             -> lint
+- npm run test:component   -> run component tests

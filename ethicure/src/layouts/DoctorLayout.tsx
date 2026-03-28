@@ -2,6 +2,7 @@ import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar"
 import { DoctorSidebar } from "@/components/doctor-sidebar"
 import { Outlet } from "react-router-dom"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { DebugMenu } from "@/components/debug-menu"
 
 export default function DoctorLayout() {
   return (
@@ -12,7 +13,8 @@ export default function DoctorLayout() {
         <main className="flex flex-1 flex-col">
           <div className="flex h-14 items-center border-b px-4">
             <SidebarTrigger />
-            <div className="ml-auto">
+            <div className="ml-auto flex items-center gap-1">
+              <DebugMenu />
               <ThemeToggle />
             </div>
           </div>

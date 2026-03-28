@@ -243,11 +243,25 @@ export default function DevicesPage() {
         body: JSON.stringify(payload),
       })
       if (!res.ok) {
-        let msg = "Failed to add device."
+        let msg = `Failed to add device (${res.status}).`
         try {
-          const data = await res.json()
-          msg = data?.error || data?.detail || (typeof data === "object" && Object.values(data)[0]) || msg
-        } catch {}
+          const contentType = res.headers.get("content-type") || ""
+          if (contentType.includes("application/json")) {
+            const data = await res.json()
+            msg =
+              data?.error ||
+              data?.detail ||
+              (typeof data === "object" && Object.values(data)[0]) ||
+              msg
+          } else {
+            const text = (await res.text()).trim()
+            if (text) {
+              msg = `${msg} ${text.slice(0, 220)}`
+            }
+          }
+        } catch {
+          // Keep fallback status-based message
+        }
         setFormError(msg)
         return
       }

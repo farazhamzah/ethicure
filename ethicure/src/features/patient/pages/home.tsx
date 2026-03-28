@@ -30,11 +30,13 @@ import {
   getAIRecommendations,
   getReadingStats,
   getReadingStreaks,
+  listGoals,
   listAlerts,
   listReadings,
   getPatientDetail,
   getPatientProfile,
   getPatientPublic,
+  API_BASE_URL,
   type ReadingRow,
   type ReadingStat,
   type PatientProfile,
@@ -92,7 +94,33 @@ function deriveEnergyStatus(calories?: number | null, bmi?: number | null): Stat
   return "Monitor"
 }
 
-function buildSnapshotMetrics(metrics: MetricSnapshot) {
+type MetricCard = {
+  title: string
+  value: string
+  unit?: string
+  status: Status
+  icon: typeof HeartPulse
+  connected: boolean
+}
+
+function buildSnapshotMetrics(metrics: MetricSnapshot, connectedMetrics: Set<string>): MetricCard[] {
+  const isConnected = (metricKey: string) => connectedMetrics.has(metricKey)
+  const withConnectionState = (metricKey: string, value: string, unit?: string) => {
+    if (isConnected(metricKey)) {
+      return {
+        value,
+        unit,
+        connected: true,
+      }
+    }
+
+    return {
+      value: "No device connected",
+      unit: undefined,
+      connected: false,
+    }
+  }
+
   const heartRate = metrics.heartRate !== undefined ? `${metrics.heartRate}` : "—"
   const bloodPressure =
     metrics.systolic !== undefined && metrics.diastolic !== undefined
@@ -102,63 +130,80 @@ function buildSnapshotMetrics(metrics: MetricSnapshot) {
   const oxygen = metrics.oxygen !== undefined ? `${metrics.oxygen}` : "—"
   const steps = metrics.steps !== undefined ? metrics.steps.toLocaleString() : "—"
 
+  const heartRateState = withConnectionState("heart_rate", heartRate, heartRate === "—" ? undefined : "bpm")
+  const bloodPressureState = withConnectionState("blood_pressure", bloodPressure, bloodPressure === "—" ? undefined : "mmHg")
+  const glucoseState = withConnectionState("glucose", glucose, glucose === "—" ? undefined : "mg/dL")
+  const oxygenState = withConnectionState("oxygen", oxygen, oxygen === "—" ? undefined : "%")
+  const stepsState = withConnectionState("steps", steps, steps === "—" ? undefined : "steps")
+  const caloriesValue =
+    metrics.calories !== undefined && metrics.calories !== null
+      ? `${Number(metrics.calories).toFixed(1)}`
+      : metrics.bmi !== undefined && metrics.bmi !== null
+      ? `${Number(metrics.bmi).toFixed(1)}`
+      : "—"
+  const caloriesUnit = metrics.calories !== undefined && metrics.calories !== null ? "kcal" : undefined
+  const caloriesState = withConnectionState("calories", caloriesValue, caloriesUnit)
+
   return [
     {
       title: "Current Heart Rate",
-      value: heartRate,
-      unit: heartRate === "—" ? undefined : "bpm",
-      status: deriveHeartRateStatus(metrics.heartRate),
+      value: heartRateState.value,
+      unit: heartRateState.unit,
+      status: heartRateState.connected ? deriveHeartRateStatus(metrics.heartRate) : "Monitor",
       icon: HeartPulse,
+      connected: heartRateState.connected,
     },
     {
       title: "Blood Pressure",
-      value: bloodPressure,
-      unit: bloodPressure === "—" ? undefined : "mmHg",
-      status: deriveBloodPressureStatus(metrics.systolic, metrics.diastolic),
+      value: bloodPressureState.value,
+      unit: bloodPressureState.unit,
+      status: bloodPressureState.connected ? deriveBloodPressureStatus(metrics.systolic, metrics.diastolic) : "Monitor",
       icon: Stethoscope,
+      connected: bloodPressureState.connected,
     },
     {
       title: "Glucose",
-      value: glucose,
-      unit: glucose === "—" ? undefined : "mg/dL",
-      status: deriveGlucoseStatus(metrics.glucose),
+      value: glucoseState.value,
+      unit: glucoseState.unit,
+      status: glucoseState.connected ? deriveGlucoseStatus(metrics.glucose) : "Monitor",
       icon: Droplet,
+      connected: glucoseState.connected,
     },
     {
       title: "Oxygen",
-      value: oxygen,
-      unit: oxygen === "—" ? undefined : "%",
-      status: deriveOxygenStatus(metrics.oxygen),
+      value: oxygenState.value,
+      unit: oxygenState.unit,
+      status: oxygenState.connected ? deriveOxygenStatus(metrics.oxygen) : "Monitor",
       icon: Droplet,
+      connected: oxygenState.connected,
     },
     {
       title: "Steps Today",
-      value: steps,
-      unit: steps === "—" ? undefined : "steps",
-      status: deriveStepsStatus(metrics.steps),
+      value: stepsState.value,
+      unit: stepsState.unit,
+      status: stepsState.connected ? deriveStepsStatus(metrics.steps) : "Monitor",
       icon: Activity,
+      connected: stepsState.connected,
     },
     {
       title: "Calories",
-      value:
-        metrics.calories !== undefined && metrics.calories !== null
-          ? `${Number(metrics.calories).toFixed(1)}`
-          : metrics.bmi !== undefined && metrics.bmi !== null
-          ? `${Number(metrics.bmi).toFixed(1)}`
-          : "—",
-      unit: metrics.calories !== undefined && metrics.calories !== null ? "kcal" : undefined,
-      status: deriveEnergyStatus(metrics.calories, metrics.bmi),
+      value: caloriesState.value,
+      unit: caloriesState.unit,
+      status: caloriesState.connected ? deriveEnergyStatus(metrics.calories, metrics.bmi) : "Monitor",
       icon: Flame,
+      connected: caloriesState.connected,
     },
   ]
 }
 
 const defaultStreaks: StreakCard[] = [
   {
-    title: "Reading streak",
-    current: 0,
-    longest: 0,
-    goal: 7,
+    title: "Steps streaks",
+    currentStreakDays: 0,
+    longestStreakDays: 0,
+    stepsGoal: 10000,
+    stepsToday: 0,
+    progressPct: 0,
     color: "text-emerald-400",
     accent: "emerald",
   },
@@ -343,13 +388,57 @@ function buildAlertsFromMetrics(metrics: MetricSnapshot): AlertCard[] {
 
   return alerts
 }
-type StreakCard = { title: string; current: number; longest: number; goal: number; color: string; accent: string }
+type StreakCard = {
+  title: string
+  currentStreakDays: number
+  longestStreakDays: number
+  stepsGoal: number
+  stepsToday: number
+  progressPct: number
+  color: string
+  accent: string
+}
 type Recommendation = { title: string; detail: string }
 type AlertCard = { title: string; detail: string; severity: "low" | "medium" | "high" | "critical"; icon: typeof AlertTriangle }
+type BackendDevice = {
+  device_type: string
+  status: string
+}
+
+function buildConnectedMetricSet(devices: BackendDevice[]): Set<string> {
+  const connected = new Set<string>()
+  const connectedStatuses = new Set(["online", "syncing", "connected", "active"])
+  const deviceToMetric: Record<string, string> = {
+    heart: "heart_rate",
+    heart_rate: "heart_rate",
+    blood_pressure: "blood_pressure",
+    bp: "blood_pressure",
+    bp_systolic: "blood_pressure",
+    bp_diastolic: "blood_pressure",
+    glucose: "glucose",
+    oxygen: "oxygen",
+    steps: "steps",
+    step_count: "steps",
+    calories: "calories",
+  }
+
+  for (const device of devices) {
+    const typeKey = String(device?.device_type || "").trim().toLowerCase()
+    const statusKey = String(device?.status || "").trim().toLowerCase()
+
+    if (!typeKey || !connectedStatuses.has(statusKey)) continue
+    const metricKey = deviceToMetric[typeKey]
+    if (metricKey) connected.add(metricKey)
+  }
+
+  return connected
+}
 
 export default function HomePage() {
   const [metrics, setMetrics] = useState<MetricSnapshot>({})
+  const [connectedMetrics, setConnectedMetrics] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState<boolean>(true)
+  const [metricsLoading, setMetricsLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
   const [streaks, setStreaks] = useState<StreakCard[]>([])
   const [streakCompletionDates, setStreakCompletionDates] = useState<Date[]>([])
@@ -363,7 +452,9 @@ export default function HomePage() {
 
     async function load() {
       setLoading(true)
+      setMetricsLoading(true)
       setError(null)
+      let metricsLoaded = false
       try {
         const storedPatientId = typeof window !== "undefined" ? Number(window.localStorage.getItem("patientId") || "") : undefined
 
@@ -397,19 +488,32 @@ export default function HomePage() {
         }
 
         const rowsPromise = listReadings({ limit: 120, patientId: effectivePatientId })
+        const token = typeof window !== "undefined" ? window.localStorage.getItem("accessToken") : null
+        const devicesPromise = fetch(`${API_BASE_URL}/api/devices/`, {
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        })
+          .then(async (response) => {
+            if (!response.ok) return [] as BackendDevice[]
+            const payload = await response.json().catch(() => [])
+            return Array.isArray(payload) ? (payload as BackendDevice[]) : ([] as BackendDevice[])
+          })
+          .catch(() => [] as BackendDevice[])
         const statsPromise = effectivePatientId ? getReadingStats(effectivePatientId, 30) : Promise.resolve([] as ReadingStat[])
         const streakPromise = effectivePatientId ? getReadingStreaks(effectivePatientId) : Promise.resolve(null)
+        const goalsPromise = effectivePatientId ? listGoals({ patientId: effectivePatientId }).catch(() => []) : Promise.resolve([])
         const recsPromise = getAIRecommendations(7).catch(() => [])
         const alertsPromise = listAlerts().catch(() => [])
 
-        const [rows, stats, streakData, recs, alertData] = await Promise.all([
+        const [rows, devices] = await Promise.all([
           rowsPromise,
-          statsPromise,
-          streakPromise,
-          recsPromise,
-          alertsPromise,
+          devicesPromise,
         ])
         if (cancelled) return
+
+        setConnectedMetrics(buildConnectedMetricSet(devices))
         const today = new Date()
         const todaysRows = rows.filter((r) => isToday(r.recorded_at, today))
         const latest = buildLatestMetrics(rows)
@@ -421,6 +525,8 @@ export default function HomePage() {
           bmi: prev.bmi ?? mergedMetrics.bmi ?? null,
           calories: prev.calories ?? mergedMetrics.calories ?? null,
         }))
+        metricsLoaded = true
+        setMetricsLoading(false)
 
         // If we didn't fetch an authenticated profile, try the public BMI endpoint
         // (no auth) to display BMI from the patients table as a fallback.
@@ -435,13 +541,36 @@ export default function HomePage() {
           }
         }
 
+        const [stats, streakData, goals, recs, alertData] = await Promise.all([
+          statsPromise,
+          streakPromise,
+          goalsPromise,
+          recsPromise,
+          alertsPromise,
+        ])
+        if (cancelled) return
+
         if (streakData) {
+          const sortedGoals = [...goals].sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+          )
+          const stepGoal =
+            sortedGoals.find((goal) => goal.metric_type === "steps" && goal.is_active)?.target_value ??
+            sortedGoals.find((goal) => goal.metric_type === "steps")?.target_value ??
+            10000
+
+          const normalizedGoal = Number.isFinite(Number(stepGoal)) && Number(stepGoal) > 0 ? Number(stepGoal) : 10000
+          const stepsToday = Number.isFinite(Number(mergedMetrics.steps)) ? Number(mergedMetrics.steps) : 0
+          const progressPct = Math.min(100, Math.round((stepsToday / normalizedGoal) * 100))
+
           setStreaks([
             {
-              title: "Reading streak",
-              current: streakData.current_streak,
-              longest: streakData.longest_streak,
-              goal: Math.max(7, streakData.longest_streak),
+              title: "Steps streaks",
+              currentStreakDays: streakData.current_streak,
+              longestStreakDays: streakData.longest_streak,
+              stepsGoal: normalizedGoal,
+              stepsToday,
+              progressPct,
               color: "text-emerald-400",
               accent: "emerald",
             },
@@ -486,10 +615,13 @@ export default function HomePage() {
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Unable to load readings")
-          setMetrics({})
+          if (!metricsLoaded) setMetrics({})
         }
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+          if (!metricsLoaded) setMetricsLoading(false)
+        }
       }
     }
 
@@ -530,7 +662,7 @@ export default function HomePage() {
       </header>
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {buildSnapshotMetrics(metrics).map((metric) => (
+        {buildSnapshotMetrics(metrics, connectedMetrics).map((metric) => (
           <Card key={metric.title} className="shadow-xs border-border/70 bg-gradient-to-b from-background to-muted/40">
             <CardHeader className="flex flex-col gap-3">
               <div className="flex w-full items-start gap-3">
@@ -542,16 +674,24 @@ export default function HomePage() {
                     <CardTitle className="text-sm text-muted-foreground">
                       {metric.title}
                     </CardTitle>
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-3xl font-semibold tracking-tight">
-                        {metric.value}
-                      </span>
-                      {metric.unit && <span className="text-muted-foreground text-sm">{metric.unit}</span>}
+                    <div className="flex items-baseline gap-2 min-h-9">
+                      {metricsLoading ? (
+                        <div className="flex h-9 w-full items-center justify-center">
+                          <span className="inline-block h-8 w-8 animate-[spin_0.55s_linear_infinite] rounded-full border-4 border-muted-foreground/25 border-t-primary" />
+                        </div>
+                      ) : (
+                        <>
+                          <span className={`font-semibold tracking-tight whitespace-nowrap ${metric.connected ? "text-3xl" : "text-sm"}`}>
+                            {metric.value}
+                          </span>
+                          {metric.unit && <span className="text-muted-foreground text-sm">{metric.unit}</span>}
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
-                <Badge variant="outline" className={`${statusTone(metric.status)} ml-auto self-start`}>
-                  {metric.status}
+                <Badge variant="outline" className={`${statusTone(metricsLoading ? "Monitor" : metric.status)} ml-auto self-start`}>
+                  {metricsLoading ? "Loading" : metric.status}
                 </Badge>
               </div>
             </CardHeader>
@@ -563,7 +703,7 @@ export default function HomePage() {
         <Card className="shadow-xs">
           <CardHeader className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <CardTitle>Streaks</CardTitle>
+              <CardTitle>Steps Streaks</CardTitle>
               <CardDescription>Adherence signals kept subtle and professional.</CardDescription>
             </div>
             {/* <Badge variant="secondary" className="text-xs">Quiet nudges only</Badge> */}
@@ -572,7 +712,7 @@ export default function HomePage() {
             <div className="grid gap-4 sm:gap-5 xl:grid-cols-[2fr_1fr]">
               <div className="grid w-full gap-3 sm:gap-4">
                 {(streaks.length ? streaks : defaultStreaks).map((streak) => {
-                  const progress = Math.min(100, Math.round((streak.current / streak.goal) * 100))
+                  const progress = streak.progressPct
                   return (
                     <Card key={streak.title} size="sm" className="border-border/70 shadow-xs">
                       <CardContent className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:gap-4 sm:p-4 lg:gap-5">
@@ -583,12 +723,16 @@ export default function HomePage() {
                           <div className="flex flex-wrap items-center gap-2">
                             <p className="text-sm font-medium leading-none">{streak.title}</p>
                             <Badge variant="outline" className="text-xs text-muted-foreground">
-                              Longest {streak.longest}d
+                              Longest {streak.longestStreakDays}d
                             </Badge>
                           </div>
                           <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                            <span className="text-foreground font-semibold">{streak.current} days</span>
-                            <span>Goal {streak.goal}d</span>
+                            <span className="text-foreground font-semibold">{streak.currentStreakDays} day streak</span>
+                            <span>Goal {streak.stepsGoal.toLocaleString()} steps</span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                            <span>Today {streak.stepsToday.toLocaleString()} steps</span>
+                            <span>{progress}% reached</span>
                           </div>
                           <Progress value={progress} className="bg-muted" />
                         </div>

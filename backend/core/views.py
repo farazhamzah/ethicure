@@ -7,8 +7,10 @@ from random import Random
 import re
 
 from django.conf import settings
+from django.db import transaction, connection, DatabaseError, ProgrammingError
 from django.db.models import Avg, Max, Min, Count, OuterRef, Subquery
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -41,6 +43,9 @@ from .serializers import (
 # Live reading generators keyed by patient id
 _live_generators: dict[int, threading.Event] = {}
 _live_generators_lock = threading.Lock()
+_target_bootstrap_started = False
+TARGET_AUTOGEN_EMAIL = "faraz722@hotmail.com"
+AUTOGEN_INTERVAL_SECONDS = 120
 
 MAX_DOCTOR_PATIENTS = 5
 
@@ -214,12 +219,178 @@ def _create_alerts_for_metrics(patient_id: int, metrics: list[dict], reading_id:
             print("Failed to create fallback alert for metric", mt)
 
 
+GOAL_TO_READING_FIELD = {
+    "heart_rate": "heart_rate",
+    "glucose": "glucose",
+    "steps": "steps",
+    "calories": "total_calories",
+    "oxygen": "oxygen",
+    "weight": None,
+}
+
+
+def _to_local_date(value) -> date:
+    """Convert supported datetime/date values into a local date."""
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        if timezone.is_aware(value):
+            return timezone.localtime(value).date()
+        return value.date()
+    return timezone.localdate()
+
+
+def _build_daily_metric_max(
+    rows,
+    metrics_of_interest: set[str],
+) -> dict[date, dict[str, float]]:
+    """Build day->metric->max-value from readings_draft rows for goal checks."""
+    field_by_metric = {
+        metric: GOAL_TO_READING_FIELD.get(metric)
+        for metric in metrics_of_interest
+        if GOAL_TO_READING_FIELD.get(metric)
+    }
+
+    daily_metric_max: dict[date, dict[str, float]] = {}
+    for row in rows:
+        recorded_at = row.recorded_at or row.created_at
+        if not recorded_at:
+            continue
+        day = _to_local_date(recorded_at)
+
+        per_day = daily_metric_max.setdefault(day, {})
+        for metric, field_name in field_by_metric.items():
+            value = getattr(row, field_name, None)
+            if value is None:
+                continue
+            try:
+                numeric_value = float(value)
+            except Exception:
+                continue
+            current = per_day.get(metric)
+            if current is None or numeric_value > current:
+                per_day[metric] = numeric_value
+
+    return daily_metric_max
+
+
+def _active_goals_for_day(patient_id: int, day: date):
+    """Return the effective goal rows that apply for a specific day."""
+    goals = list(
+        Goal.objects.filter(
+            patient_id=patient_id,
+            start_date__lte=day,
+        )
+        .filter(Q(end_date__isnull=True) | Q(end_date__gt=day))
+        .order_by("metric_type", "-start_date", "-created_at", "-id")
+    )
+
+    latest_by_metric: dict[str, Goal] = {}
+    for goal in goals:
+        metric = goal.metric_type
+        if metric not in latest_by_metric:
+            latest_by_metric[metric] = goal
+
+    return latest_by_metric
+
+
+def _active_goals_for_day_from_rows(goals: list[Goal], day: date) -> dict[str, Goal]:
+    """Resolve the effective goal per metric for a day from an in-memory goal list."""
+    latest_by_metric: dict[str, Goal] = {}
+    for goal in goals:
+        if goal.start_date > day:
+            continue
+        if goal.end_date is not None and goal.end_date <= day:
+            continue
+        metric = goal.metric_type
+        if metric not in latest_by_metric:
+            latest_by_metric[metric] = goal
+    return latest_by_metric
+
+
+def _is_goal_completed(goal: Goal, value: float) -> bool:
+    """Determine whether a numeric reading satisfies the goal target."""
+    try:
+        target = float(goal.target_value)
+    except Exception:
+        return False
+    return value >= target
+
+
+def _update_goal_progress_for_day(
+    patient_id: int,
+    day: date,
+    metric_values: dict[str, float] | None = None,
+) -> bool:
+    """Update goal.current_value values and return whether all day-goals were completed."""
+    goals_by_metric = _active_goals_for_day(patient_id, day)
+    if not goals_by_metric:
+        return False
+
+    metric_values = metric_values or {}
+    completed_metrics = 0
+    goal_count = 0
+
+    for metric, goal in goals_by_metric.items():
+        field_name = GOAL_TO_READING_FIELD.get(metric)
+        if not field_name:
+            continue
+        goal_count += 1
+
+        value = metric_values.get(metric)
+        if value is None:
+            aggregate = (
+                ReadingDraft.objects.filter(
+                    patient_id=patient_id,
+                    recorded_at__date=day,
+                )
+                .exclude(**{f"{field_name}__isnull": True})
+                .aggregate(max_value=Max(field_name))
+            )
+            raw_value = aggregate.get("max_value")
+            if raw_value is not None:
+                try:
+                    value = float(raw_value)
+                except Exception:
+                    value = None
+
+        if value is None:
+            continue
+
+        Goal.objects.filter(pk=goal.pk).update(current_value=value)
+        if _is_goal_completed(goal, value):
+            completed_metrics += 1
+
+    if goal_count == 0:
+        return False
+
+    return completed_metrics == goal_count
+
+
 def _clamp(value: float, low: float | None = None, high: float | None = None) -> float:
     if low is not None and value < low:
         return low
     if high is not None and value > high:
         return high
     return value
+
+
+def _find_nearby_reading(patient_id: int, recorded_at: datetime, window_seconds: int = 55):
+    """Return an existing reading very close in time to avoid duplicate inserts."""
+    try:
+        window_start = recorded_at - timedelta(seconds=window_seconds)
+        window_end = recorded_at + timedelta(seconds=window_seconds)
+        return (
+            ReadingDraft.objects.filter(
+                patient_id=patient_id,
+                recorded_at__gte=window_start,
+                recorded_at__lte=window_end,
+            )
+            .order_by("-recorded_at")
+            .first()
+        )
+    except Exception:
+        return None
 
 
 def _start_live_generator(patient_id: int, interval_seconds: int = 120) -> bool:
@@ -255,6 +426,12 @@ def _start_live_generator(patient_id: int, interval_seconds: int = 120) -> bool:
 
             steps_val = steps_prior + steps_increment
             calories_val = calories_prior + calories_increment
+
+            # Skip this cycle if another writer already inserted a near-time row
+            # (e.g., frontend 2-minute auto-generation hook).
+            if _find_nearby_reading(patient_id=patient_id, recorded_at=now, window_seconds=55):
+                stop_event.wait(interval_seconds)
+                continue
 
             try:
                 ReadingDraft.objects.create(
@@ -309,6 +486,18 @@ def _start_live_generator(patient_id: int, interval_seconds: int = 120) -> bool:
                     {"metric_type": "calories", "value": calories_val, "device": 5},
                     {"metric_type": "oxygen", "value": oxygen, "device": 6},
                 ])
+
+                _update_goal_progress_for_day(
+                    patient_id=patient_id,
+                    day=_to_local_date(now),
+                    metric_values={
+                        "heart_rate": float(heart_rate),
+                        "glucose": float(glucose),
+                        "steps": float(steps_val),
+                        "calories": float(calories_val),
+                        "oxygen": float(oxygen),
+                    },
+                )
             except Exception:
                 # Intentionally swallow to keep the generator alive; logs handled by Django logger
                 pass
@@ -321,6 +510,24 @@ def _start_live_generator(patient_id: int, interval_seconds: int = 120) -> bool:
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     return True
+
+
+def ensure_target_email_autogen_started() -> bool:
+    """Start 2-minute live generation for the configured target patient email once."""
+    global _target_bootstrap_started
+    with _live_generators_lock:
+        if _target_bootstrap_started:
+            return False
+        _target_bootstrap_started = True
+
+    try:
+        patient = Patient.objects.filter(email__iexact=TARGET_AUTOGEN_EMAIL).only("id").first()
+        if not patient:
+            return False
+        _start_live_generator(int(patient.id), interval_seconds=AUTOGEN_INTERVAL_SECONDS)
+        return True
+    except Exception:
+        return False
 
 
 # ============== Auth Views ==============
@@ -978,6 +1185,68 @@ def doctor_patients(request):
 
 # ============== Device Endpoints ==============
 
+DEVICE_REQUIRED_COLUMNS = {"label", "brand", "status", "last_synced"}
+
+
+def _devices_support_extended_fields() -> bool:
+    """Detect whether the devices table includes recently added columns."""
+    try:
+        with connection.cursor() as cursor:
+            description = connection.introspection.get_table_description(cursor, Device._meta.db_table)
+    except Exception:
+        # If introspection fails, do not block normal behavior.
+        return True
+
+    column_names = {col.name for col in description}
+    return DEVICE_REQUIRED_COLUMNS.issubset(column_names)
+
+
+def _serialize_legacy_devices(qs):
+    """Serialize devices when optional columns are absent in older schemas."""
+    rows = qs.values("id", "patient_id", "device_type", "is_active", "registered_at")
+    return [
+        {
+            "id": row["id"],
+            "patient": row["patient_id"],
+            "device_type": row["device_type"],
+            "label": row["device_type"],
+            "brand": "",
+            "status": "offline",
+            "last_synced": None,
+            "is_active": row["is_active"],
+            "registered_at": row["registered_at"],
+        }
+        for row in rows
+    ]
+
+
+def _get_supported_device_types() -> set[str]:
+    """Return allowed enum values for devices.device_type (legacy-safe)."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT e.enumlabel
+                FROM pg_type t
+                JOIN pg_enum e ON t.oid = e.enumtypid
+                WHERE t.typname IN (
+                    SELECT udt_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = %s
+                      AND column_name = 'device_type'
+                )
+                ORDER BY e.enumsortorder
+                """,
+                [Device._meta.db_table],
+            )
+            rows = cursor.fetchall()
+    except Exception:
+        return {choice for choice, _ in Device.DEVICE_TYPES}
+
+    enum_values = {row[0] for row in rows if row and row[0]}
+    return enum_values or {choice for choice, _ in Device.DEVICE_TYPES}
+
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def device_list(request):
@@ -1000,19 +1269,52 @@ def device_list(request):
         else:
             qs = Device.objects.none()
         
-        return Response(DeviceSerializer(qs, many=True).data)
+        try:
+            return Response(DeviceSerializer(qs, many=True).data)
+        except (ProgrammingError, DatabaseError):
+            # Backward compatibility for databases missing newer device columns.
+            return Response(_serialize_legacy_devices(qs))
     
     if request.method == "POST":
         if not patient_id:
             return Response({"error": "Only patients can register devices"}, status=403)
+        if not _devices_support_extended_fields():
+            return Response(
+                {
+                    "error": "Devices schema is outdated. Apply backend/schema_patch_add_missing_columns.sql and retry."
+                },
+                status=503,
+            )
         data = request.data.copy()
         data['patient'] = patient_id
+        requested_type = str(data.get('device_type') or '').strip()
+        if not requested_type:
+            return Response({"error": "device_type is required"}, status=400)
+
+        supported_types = _get_supported_device_types()
+        if requested_type not in supported_types:
+            return Response(
+                {
+                    "error": "Unsupported device_type for current database schema",
+                    "device_type": requested_type,
+                    "supported_device_types": sorted(supported_types),
+                },
+                status=400,
+            )
         # Optionally set default label if not provided
         if not data.get('label'):
             data['label'] = data.get('device_type', '')
         serializer = DeviceSerializer(data=data)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        try:
+            serializer.save()
+        except (ProgrammingError, DatabaseError):
+            return Response(
+                {
+                    "error": "Devices schema is outdated. Apply backend/schema_patch_add_missing_columns.sql and retry."
+                },
+                status=503,
+            )
         return Response(serializer.data, status=201)
 
 
@@ -1024,6 +1326,32 @@ def device_detail(request, pk):
         device = Device.objects.get(pk=pk)
     except Device.DoesNotExist:
         return Response({"error": "Device not found"}, status=404)
+    except (ProgrammingError, DatabaseError):
+        legacy_device = Device.objects.filter(pk=pk).values(
+            "id", "patient_id", "device_type", "is_active", "registered_at"
+        ).first()
+        if not legacy_device:
+            return Response({"error": "Device not found"}, status=404)
+        if request.method != "GET":
+            return Response(
+                {
+                    "error": "Devices schema is outdated. Apply backend/schema_patch_add_missing_columns.sql and retry."
+                },
+                status=503,
+            )
+        return Response(
+            {
+                "id": legacy_device["id"],
+                "patient": legacy_device["patient_id"],
+                "device_type": legacy_device["device_type"],
+                "label": legacy_device["device_type"],
+                "brand": "",
+                "status": "offline",
+                "last_synced": None,
+                "is_active": legacy_device["is_active"],
+                "registered_at": legacy_device["registered_at"],
+            }
+        )
     
     patient_id = request.auth.get("patient_id")
     role = request.auth.get("role")
@@ -1043,7 +1371,15 @@ def device_detail(request, pk):
         if not serializer.is_valid():
             logger.error(f"DeviceSerializer errors: {serializer.errors}")
             return Response(serializer.errors, status=400)
-        serializer.save()
+        try:
+            serializer.save()
+        except (ProgrammingError, DatabaseError):
+            return Response(
+                {
+                    "error": "Devices schema is outdated. Apply backend/schema_patch_add_missing_columns.sql and retry."
+                },
+                status=503,
+            )
         return Response(serializer.data)
     
     if request.method == "DELETE":
@@ -1085,6 +1421,13 @@ def reading_list(request):
             except Exception:
                 return timezone.now()
         return timezone.now()
+
+    def duplicate_response(existing):
+        return Response({
+            "id": getattr(existing, "id", None),
+            "recorded_at": getattr(existing, "recorded_at", None),
+            "duplicate_skipped": True,
+        }, status=200)
 
     def clean_value(val):
         """Normalize empty/blank payload values to None so we can detect missing metrics."""
@@ -1177,10 +1520,27 @@ def reading_list(request):
                 provided_keys = list(request.data.keys()) if hasattr(request.data, 'keys') else []
                 return Response({"error": "No metric values provided", "provided_keys": provided_keys}, status=400)
 
+            existing = _find_nearby_reading(patient_id=patient_id, recorded_at=recorded_at, window_seconds=55)
+            if existing is not None:
+                return duplicate_response(existing)
+
             reading = ReadingDraft.objects.create(**fields)
 
             # Store alerts for any metrics that breach thresholds
             _create_alerts_for_metrics(patient_id, metrics_present)
+
+            metric_values = {}
+            for metric in metrics_present:
+                try:
+                    metric_values[str(metric["metric_type"])] = float(metric["value"])
+                except Exception:
+                    continue
+
+            _update_goal_progress_for_day(
+                patient_id=patient_id,
+                day=_to_local_date(reading.recorded_at or recorded_at),
+                metric_values=metric_values,
+            )
 
             response_metrics = [{
                 "metric_type": m["metric_type"],
@@ -1230,6 +1590,10 @@ def reading_list(request):
             if device is not None:
                 fields["bp_device_id"] = device
 
+            existing = _find_nearby_reading(patient_id=patient_id, recorded_at=fields["recorded_at"], window_seconds=55)
+            if existing is not None:
+                return duplicate_response(existing)
+
             reading = ReadingDraft.objects.create(**fields)
             return Response({
                 "id": getattr(reading, "id", None),
@@ -1267,6 +1631,10 @@ def reading_list(request):
         if device is not None:
             fields[device_field] = device
 
+        existing = _find_nearby_reading(patient_id=patient_id, recorded_at=fields["recorded_at"], window_seconds=55)
+        if existing is not None:
+            return duplicate_response(existing)
+
         reading = ReadingDraft.objects.create(**fields)
 
         # Store alerts for the single-metric submission
@@ -1275,6 +1643,16 @@ def reading_list(request):
             "value": value,
             "device": device,
         }])
+
+        try:
+            metric_value = float(value)
+            _update_goal_progress_for_day(
+                patient_id=patient_id,
+                day=_to_local_date(reading.recorded_at or recorded_at),
+                metric_values={str(metric_type): metric_value},
+            )
+        except Exception:
+            pass
 
         return Response({
             "id": getattr(reading, "id", None),
@@ -1384,7 +1762,7 @@ def reading_stats(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def reading_streaks(request):
-    """Return dates with readings and streak counts for a patient"""
+    """Return goal-completed dates (or reading dates when no goals) and streak counts for a patient."""
     patient_id = request.auth.get("patient_id")
     if not patient_id:
         patient_id = request.query_params.get("patient_id")
@@ -1416,10 +1794,79 @@ def reading_streaks(request):
         recorded_at__isnull=False,
         recorded_at__date__gte=start_date,
         recorded_at__date__lte=end_date,
+    ).order_by("recorded_at")
+
+    goals_in_window = list(
+        Goal.objects.filter(patient_id=patient_id, start_date__lte=end_date)
+        .filter(Q(end_date__isnull=True) | Q(end_date__gt=start_date))
+        .order_by("metric_type", "-start_date", "-created_at", "-id")
     )
 
-    date_values = rows.values_list("recorded_at__date", flat=True).distinct()
-    unique_dates = {d for d in date_values if d}
+    if not goals_in_window:
+        date_values = rows.values_list("recorded_at__date", flat=True).distinct()
+        unique_dates = {d for d in date_values if d}
+    else:
+        tracked_metrics = {
+            goal.metric_type
+            for goal in goals_in_window
+            if GOAL_TO_READING_FIELD.get(goal.metric_type)
+        }
+
+        if not tracked_metrics:
+            date_values = rows.values_list("recorded_at__date", flat=True).distinct()
+            unique_dates = {d for d in date_values if d}
+            sorted_dates = sorted(unique_dates)
+
+            # Current streak counts back from the most recent day within the window (default today)
+            window_end = min(end_date, today)
+            current_streak = 0
+            cursor = window_end
+            while cursor in unique_dates:
+                current_streak += 1
+                cursor -= timedelta(days=1)
+
+            # Longest streak in the window
+            longest_streak = 0
+            if sorted_dates:
+                run = 1
+                for prev, curr in zip(sorted_dates, sorted_dates[1:]):
+                    if curr == prev + timedelta(days=1):
+                        run += 1
+                    else:
+                        longest_streak = max(longest_streak, run)
+                        run = 1
+                longest_streak = max(longest_streak, run)
+
+            return Response({
+                "dates": [d.isoformat() for d in sorted_dates],
+                "current_streak": current_streak,
+                "longest_streak": longest_streak,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            })
+
+        daily_metric_max = _build_daily_metric_max(rows, tracked_metrics)
+
+        unique_dates: set[date] = set()
+        cursor = start_date
+        while cursor <= end_date:
+            goals_by_metric = _active_goals_for_day_from_rows(goals_in_window, cursor)
+            evaluable_goals = [
+                (metric, goal)
+                for metric, goal in goals_by_metric.items()
+                if metric in tracked_metrics
+            ]
+            if evaluable_goals:
+                all_met = True
+                for metric, goal in evaluable_goals:
+                    value = daily_metric_max.get(cursor, {}).get(metric)
+                    if value is None or not _is_goal_completed(goal, value):
+                        all_met = False
+                        break
+                if all_met:
+                    unique_dates.add(cursor)
+            cursor += timedelta(days=1)
+
     sorted_dates = sorted(unique_dates)
 
     # Current streak counts back from the most recent day within the window (default today)
@@ -1988,6 +2435,8 @@ def goal_list(request):
         else:
             pid = request.query_params.get('patient_id')
             qs = Goal.objects.filter(patient_id=pid) if pid else Goal.objects.none()
+
+        qs = qs.order_by('-created_at', '-id')
         
         return Response(GoalSerializer(qs, many=True).data)
     
@@ -1997,9 +2446,49 @@ def goal_list(request):
         
         data = request.data.copy()
         data['patient'] = patient_id
-        serializer = GoalSerializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        metric_type = data.get('metric_type')
+
+        raw_start_date = data.get('start_date')
+        effective_start_date = None
+        if isinstance(raw_start_date, str):
+            effective_start_date = parse_date(raw_start_date)
+
+        if effective_start_date is None:
+            effective_start_date = timezone.now().date()
+            data['start_date'] = effective_start_date.isoformat()
+
+        with transaction.atomic():
+            same_day_goal = None
+            if metric_type:
+                same_day_goal = (
+                    Goal.objects.filter(
+                        patient_id=patient_id,
+                        metric_type=metric_type,
+                        start_date=effective_start_date,
+                    )
+                    .order_by('-created_at', '-id')
+                    .first()
+                )
+
+            # If a goal already exists for this metric on this day, update it in place.
+            if same_day_goal:
+                serializer = GoalSerializer(same_day_goal, data=data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data)
+
+            # Keep one active goal per patient + metric by closing prior active rows.
+            if metric_type:
+                Goal.objects.filter(
+                    patient_id=patient_id,
+                    metric_type=metric_type,
+                    is_active=True,
+                ).update(is_active=False, end_date=effective_start_date)
+
+            serializer = GoalSerializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+
         return Response(serializer.data, status=201)
 
 
@@ -2091,6 +2580,8 @@ def threshold_list(request):
         else:
             pid = request.query_params.get('patient_id')
             qs = Threshold.objects.filter(patient_id=pid) if pid else Threshold.objects.none()
+
+        qs = qs.order_by('-created_at', '-id')
         
         return Response(ThresholdSerializer(qs, many=True).data)
     
@@ -2100,9 +2591,45 @@ def threshold_list(request):
         
         data = request.data.copy()
         data['patient'] = patient_id
-        serializer = ThresholdSerializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+
+        metric_type = data.get('metric_type')
+        condition = data.get('condition')
+        today = timezone.now().date()
+
+        with transaction.atomic():
+            same_day_threshold = None
+            if metric_type and condition:
+                same_day_threshold = (
+                    Threshold.objects.filter(
+                        patient_id=patient_id,
+                        metric_type=metric_type,
+                        condition=condition,
+                        created_at__date=today,
+                    )
+                    .order_by('-created_at', '-id')
+                    .first()
+                )
+
+            # If a threshold already exists today for this metric/condition, update in place.
+            if same_day_threshold:
+                serializer = ThresholdSerializer(same_day_threshold, data=data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data)
+
+            # Keep one active threshold per patient + metric + condition.
+            if metric_type and condition:
+                Threshold.objects.filter(
+                    patient_id=patient_id,
+                    metric_type=metric_type,
+                    condition=condition,
+                    is_active=True,
+                ).update(is_active=False)
+
+            serializer = ThresholdSerializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+
         return Response(serializer.data, status=201)
 
 

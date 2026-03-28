@@ -6,7 +6,6 @@ import PersonalInfo from "./login/personal-info"
 import ForgotPassword from "./login/forgot-password"
 import VerifyOTP from "./login/verify-otp"
 import ResetPassword from "./login/reset-password"
-import Dashboard from "@/features/patient/pages/dashboard"
 import DevicesPage from "@/features/patient/pages/devices"
 import ReportsPage from "@/features/patient/pages/reports"
 import SettingsPage from "@/features/patient/pages/settings"
@@ -17,11 +16,13 @@ import AiAssistantPage from "@/features/patient/pages/ai-assistant"
 import NotificationsPage from "@/features/patient/pages/notifications"
 import LogoutPage from "@/features/patient/pages/logout"
 import HealthDataPage from "@/features/patient/pages/health-data"
-import Page from "@/features/patient/pages/page"
 import AdminHomePage from "@/features/admin/AdminHomePage"
 import DoctorHomePage from "@/features/doctor/DoctorHomePage"
 import PatientDetailPage from "@/features/doctor/PatientDetailPage"
 import DoctorNotificationsPage from "@/features/doctor/DoctorNotificationsPage"
+import PatientDataPage from "@/features/doctor/PatientDataPage"
+import PatientReportsPage from "@/features/doctor/PatientReportsPage"
+import DoctorPatientWorkspaceLayout from "@/features/doctor/DoctorPatientWorkspaceLayout"
 
 import AppLayout from "./layouts/AppLayout"
 import AdminLayout from "./layouts/AdminLayout"
@@ -40,7 +41,6 @@ function App() {
     <BrowserRouter>
       <Routes>
         {/* Public routes (no sidebar) */}
-        <Route path="/page" element={<Page />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/signup/personal-info" element={<PersonalInfo />} />
@@ -52,7 +52,6 @@ function App() {
         <Route element={<RequireAuth />}>
           <Route element={<AppLayout />}>
           <Route path="/" element={<HomePage />} />
-          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/devices" element={<DevicesPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/your-data" element={<YourDataPage />} />
@@ -76,7 +75,11 @@ function App() {
         <Route element={<RequireAuth />}>
           <Route element={<DoctorLayout />}>
             <Route path="/doctor" element={<DoctorHomePage />} />
-            <Route path="/doctor/patients/:id" element={<PatientDetailPage />} />
+            <Route path="/doctor/patients/:id" element={<DoctorPatientWorkspaceLayout />}>
+              <Route index element={<PatientDetailPage />} />
+              <Route path="data" element={<PatientDataPage />} />
+              <Route path="reports" element={<PatientReportsPage />} />
+            </Route>
             <Route path="/doctor/notifications" element={<DoctorNotificationsPage />} />
           </Route>
         </Route>

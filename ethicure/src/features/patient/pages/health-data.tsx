@@ -10,7 +10,7 @@ import {
   Stethoscope,
   Watch,
 } from "lucide-react"
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, XAxis, YAxis } from "recharts"
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -199,24 +199,92 @@ const metricSeries = [
 ]
 
 type FilterValue = (typeof filterOptions)[number]
+type BackendDevice = {
+  device_type: string
+  status: string
+}
+
+function buildConnectedMetricSet(devices: BackendDevice[]): Set<string> {
+  const connected = new Set<string>()
+  const connectedStatuses = new Set(["online", "syncing", "connected", "active"])
+  const deviceToMetric: Record<string, string> = {
+    heart: "heart_rate",
+    heart_rate: "heart_rate",
+    blood_pressure: "blood_pressure",
+    bp: "blood_pressure",
+    bp_systolic: "blood_pressure",
+    bp_diastolic: "blood_pressure",
+    glucose: "glucose",
+    oxygen: "oxygen",
+    steps: "steps",
+    step_count: "steps",
+    calories: "calories",
+    sleep: "sleep",
+    smart_watch: "smart_watch",
+    watch: "smart_watch",
+  }
+
+  for (const device of devices) {
+    const typeKey = String(device?.device_type || "").trim().toLowerCase()
+    const statusKey = String(device?.status || "").trim().toLowerCase()
+    if (!typeKey || !connectedStatuses.has(statusKey)) continue
+    const metricKey = deviceToMetric[typeKey]
+    if (metricKey) connected.add(metricKey)
+  }
+
+  return connected
+}
+
+function metricConnectionKey(metricKey: string): string {
+  const map: Record<string, string> = {
+    heartRate: "heart_rate",
+    bloodPressure: "blood_pressure",
+    glucose: "glucose",
+    stepCount: "steps",
+    oxygen: "oxygen",
+    calories: "calories",
+    sleep: "sleep",
+    watch: "smart_watch",
+  }
+  return map[metricKey] ?? metricKey
+}
 
 export default function HealthDataPage() {
   const navigate = useNavigate()
   const [filter, setFilter] = useState<FilterValue>("monthly")
   const [latestByType, setLatestByType] = useState<Record<string, any>>({})
   const [readingsRows, setReadingsRows] = useState<any[]>([])
+  const [connectedMetrics, setConnectedMetrics] = useState<Set<string>>(new Set())
+  const [metricsLoading, setMetricsLoading] = useState<boolean>(true)
 
   useEffect(() => {
     let cancelled = false
 
-      async function loadLatest() {
+    async function loadLatest() {
+      setMetricsLoading(true)
       try {
         const storedPatientId = typeof window !== "undefined" ? Number(window.localStorage.getItem("patientId") || "") : undefined
-        const { listReadings } = await import("@/lib/api")
+        const { listReadings, API_BASE_URL } = await import("@/lib/api")
         // request a larger window (past 12 months) so 6M/yearly buckets are populated
         const since = new Date()
         since.setDate(since.getDate() - 365)
-        const rows = await listReadings({ startDate: since.toISOString().slice(0,10), limit: 5000, patientId: storedPatientId })
+        const token = typeof window !== "undefined" ? window.localStorage.getItem("accessToken") : null
+        // readings are flattened per metric on the backend; hourly x 12 months can exceed 50k rows
+        const rowsPromise = listReadings({ startDate: since.toISOString().slice(0, 10), limit: 70000, patientId: storedPatientId })
+        const devicesPromise = fetch(`${API_BASE_URL}/api/devices/`, {
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        })
+          .then(async (response) => {
+            if (!response.ok) return [] as BackendDevice[]
+            const payload = await response.json().catch(() => [])
+            return Array.isArray(payload) ? (payload as BackendDevice[]) : ([] as BackendDevice[])
+          })
+          .catch(() => [] as BackendDevice[])
+
+        const [rows, devices] = await Promise.all([rowsPromise, devicesPromise])
 
         if (cancelled) return
 
@@ -236,9 +304,12 @@ export default function HealthDataPage() {
         if (!cancelled) {
           setLatestByType(map)
           setReadingsRows(rows)
+          setConnectedMetrics(buildConnectedMetricSet(devices))
         }
       } catch (err) {
         // ignore failures silently; keep defaults
+      } finally {
+        if (!cancelled) setMetricsLoading(false)
       }
     }
 
@@ -298,12 +369,18 @@ export default function HealthDataPage() {
       const series = readingsRows.length
         ? buildSeriesFromRows(metric.key, filter, now, readingsRows)
         : buildSeries(metricCopy, filter, now)
-      const values = series.map((d) => d.value)
-      const min = Math.min(...values)
-      const max = Math.max(...values)
-      const avg = Number(
-        (values.reduce((acc, v) => acc + v, 0) / values.length).toFixed(1)
-      )
+      const connectionKey = metricConnectionKey(metric.key)
+      const connected = connectedMetrics.has(connectionKey)
+
+      const values = series
+        .map((d) => Number(d.value))
+        .filter((v) => Number.isFinite(v))
+
+      const min = values.length ? Math.min(...values) : 0
+      const max = values.length ? Math.max(...values) : 0
+      const avg = values.length
+        ? Number((values.reduce((acc, v) => acc + v, 0) / values.length).toFixed(1))
+        : 0
 
       // compute a display-friendly latest value (blood pressure shows systolic/diastolic if available)
       let displayLatest: string | number | undefined = series[series.length - 1]?.value
@@ -315,14 +392,19 @@ export default function HealthDataPage() {
         }
       }
 
+      if (!connected) {
+        displayLatest = "No device connected"
+      }
+
       return {
         ...metric,
-        series,
+        series: connected ? series : [],
         summary: { min, max, avg },
         displayLatest,
+        connected,
       }
     })
-  }, [filter, latestByType])
+  }, [filter, latestByType, readingsRows, connectedMetrics])
 
   function buildSeriesFromRows(
     metricKey: string,
@@ -353,10 +435,10 @@ export default function HealthDataPage() {
 
     // key formatter depending on granularity
     const keyForDate = (d: Date) => {
-      if (filter === "daily") return d.toISOString().slice(0,13) // YYYY-MM-DDTHH
-      if (filter === "weekly" || filter === "monthly") return d.toISOString().slice(0,10) // YYYY-MM-DD
+      if (filter === "daily") return d.toISOString().slice(0, 13) // YYYY-MM-DDTHH
+      if (filter === "weekly" || filter === "monthly") return d.toISOString().slice(0, 10) // YYYY-MM-DD
       // 6m/yearly -> monthly bucket
-      return d.toISOString().slice(0,7) // YYYY-MM
+      return d.toISOString().slice(0, 7) // YYYY-MM
     }
 
     // build grouping: simple per-bucket averages for all metrics
@@ -510,7 +592,7 @@ export default function HealthDataPage() {
             },
           } satisfies ChartConfig
 
-          const avgDisplay = (metric as any).summary?.avg ?? metric.series[metric.series.length - 1]?.value
+          const avgDisplay = (metric as any).displayLatest ?? (metric as any).summary?.avg ?? metric.series[metric.series.length - 1]?.value
 
           return (
             <Card key={metric.key} className="h-full border-border/60 bg-card/70 shadow-xs">
@@ -525,60 +607,82 @@ export default function HealthDataPage() {
                         {metric.title}
                       </CardTitle>
                     </div>
-                    <div className="text-2xl font-semibold tracking-tight">
-                      {avgDisplay}
-                      {metric.unit ? <span className="ml-1 text-base text-muted-foreground">{metric.unit}</span> : null}
+                    <div className="min-h-9">
+                      {metricsLoading ? (
+                        <div className="flex h-9 items-center justify-center">
+                          <span className="inline-block h-8 w-8 animate-[spin_0.55s_linear_infinite] rounded-full border-4 border-muted-foreground/25 border-t-primary" />
+                        </div>
+                      ) : (
+                        <div className={`font-semibold tracking-tight ${metric.connected ? "text-2xl" : "text-sm"}`}>
+                          {avgDisplay}
+                          {metric.connected && metric.unit ? <span className="ml-1 text-base text-muted-foreground">{metric.unit}</span> : null}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <Badge variant="secondary" className="text-xs">{filterLabel(filter)}</Badge>
                 </div>
-                <p className="text-[11px] text-muted-foreground">
-                  Min {metric.summary.min}{metric.unit ? ` ${metric.unit}` : ""} · Max {metric.summary.max}{metric.unit ? ` ${metric.unit}` : ""} · Avg {metric.summary.avg}{metric.unit ? ` ${metric.unit}` : ""}
-                </p>
+                {metricsLoading ? (
+                  <p className="text-[11px] text-muted-foreground">Loading trend summary...</p>
+                ) : metric.connected ? (
+                  <p className="text-[11px] text-muted-foreground">
+                    Min {metric.summary.min}{metric.unit ? ` ${metric.unit}` : ""} · Max {metric.summary.max}{metric.unit ? ` ${metric.unit}` : ""} · Avg {metric.summary.avg}{metric.unit ? ` ${metric.unit}` : ""}
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground">Connect this device to view trend data.</p>
+                )}
               </CardHeader>
               <CardContent className="px-4 pb-4">
                 <div className="h-[200px] rounded-lg border border-border/70 bg-muted/30 p-1.5">
-                  <ChartContainer config={chartConfig} className="h-full w-full">
-                    <ResponsiveContainer width="100%" height="100%">
+                  {metricsLoading ? (
+                    <div className="flex h-full items-center justify-center">
+                      <span className="inline-block h-10 w-10 animate-[spin_0.55s_linear_infinite] rounded-full border-4 border-muted-foreground/25 border-t-primary" />
+                    </div>
+                  ) : !metric.connected ? (
+                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                      No device connected
+                    </div>
+                  ) : (
+                    <ChartContainer config={chartConfig} className="h-full w-full">
                       <LineChart data={metric.series} margin={{ left: 6, right: 6, top: 6, bottom: 6 }}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(0 0% 80% / 0.3)" />
-                        <XAxis
-                          dataKey="date"
-                          tickLine={false}
-                          axisLine={false}
-                          tickMargin={8}
-                          minTickGap={24}
-                          tickFormatter={(value) => formatLabel(value, filter)}
-                          className="text-xs text-muted-foreground"
-                        />
-                        <YAxis
-                          tickLine={false}
-                          axisLine={false}
-                          width={42}
-                          tickMargin={6}
-                          domain={computeDomain(metric.summary)}
-                          className="text-xs text-muted-foreground"
-                        />
-                        <ChartTooltip
-                          cursor={{ stroke: "var(--border)", strokeWidth: 1 }}
-                          content={
-                            <ChartTooltipContent
-                              indicator="dot"
-                              labelFormatter={(value) => formatTooltip(value, filter)}
-                            />
-                          }
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="value"
-                          stroke={`var(--color-${metric.key})`}
-                          strokeWidth={2}
-                          dot={false}
-                          activeDot={{ r: 3.5 }}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </ChartContainer>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(0 0% 80% / 0.3)" />
+                          <XAxis
+                            dataKey="date"
+                            tickLine={false}
+                            axisLine={false}
+                            tickMargin={8}
+                            minTickGap={24}
+                            tickFormatter={(value) => formatLabel(value, filter)}
+                            className="text-xs text-muted-foreground"
+                          />
+                          <YAxis
+                            tickLine={false}
+                            axisLine={false}
+                            width={42}
+                            tickMargin={6}
+                            domain={computeDomain(metric.summary)}
+                            className="text-xs text-muted-foreground"
+                          />
+                          <ChartTooltip
+                            cursor={{ stroke: "var(--border)", strokeWidth: 1 }}
+                            content={
+                              <ChartTooltipContent
+                                indicator="dot"
+                                labelFormatter={(value) => formatTooltip(value, filter)}
+                              />
+                            }
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="value"
+                            stroke={`var(--color-${metric.key})`}
+                            strokeWidth={2}
+                            dot={false}
+                            activeDot={{ r: 3.5 }}
+                          />
+                        </LineChart>
+                    </ChartContainer>
+                  )}
                 </div>
               </CardContent>
             </Card>
