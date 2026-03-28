@@ -383,7 +383,7 @@ export default function HealthDataPage() {
         : 0
 
       // compute a display-friendly latest value (blood pressure shows systolic/diastolic if available)
-      let displayLatest: string | number | undefined = series[series.length - 1]?.value
+      let displayLatest: string | number | undefined = series[series.length - 1]?.value ?? undefined
       if (metric.key === "bloodPressure") {
         if (bpSystolic !== null && bpDiastolic !== null) {
           displayLatest = `${bpSystolic}/${bpDiastolic}`
@@ -480,7 +480,7 @@ export default function HealthDataPage() {
 
     // build date range
     const series: { date: string; value: number | null }[] = []
-    const firstKey = keys[0]
+    // const firstKey = keys[0]
 
     if (filter === "daily") {
       for (let i = 0; i < 24; i++) {

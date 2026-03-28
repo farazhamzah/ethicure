@@ -28,8 +28,8 @@ import {
   AlertDialogTitle,
   AlertDialogDescription,
   AlertDialogFooter,
-  AlertDialogCancel,
-  AlertDialogAction,
+  // AlertDialogCancel,
+  // AlertDialogAction,
 } from "@/components/ui/alert-dialog"
 import {
   Card,
@@ -285,7 +285,7 @@ export default function DevicesPage() {
     }
   }
 
-  const [deleteConfirm, setDeleteConfirm] = useReactState<string | null>(null)
+  // const [deleteConfirm, setDeleteConfirm] = useReactState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useReactState<string | null>(null)
   const handleDelete = (key: string) => {
     setPendingDelete(key)

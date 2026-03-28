@@ -147,7 +147,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               render={<Link to="/" className="flex items-center gap-2" />}
               className="data-[slot=sidebar-menu-button]:!p-1.5"
             >
-              <span className="text-base font-semibold">Ethicare</span>
+              <span className="text-base font-semibold">Ethicure</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>

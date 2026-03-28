@@ -1,7 +1,6 @@
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken
-from django.contrib.auth.models import AnonymousUser
-from core.models import Staff, Patient
+from core.models import Staff
 
 
 def custom_jwt_payload(user):
@@ -37,37 +36,17 @@ class CustomJWTAuthentication(JWTAuthentication):
     def authenticate(self, request):
         header = self.get_header(request)
         if header is None:
-            # TEMP: allow all requests as admin when no token is provided
-            fallback_user = CustomUser(
-                user_type='staff',
-                user_id=0,
-                username='open-access',
-                role='admin'
-            )
-            return (fallback_user, {'role': 'admin', 'staff_id': 0})
+            return None
         
         raw_token = self.get_raw_token(header)
         if raw_token is None:
-            # TEMP: allow all requests as admin when no token is provided
-            fallback_user = CustomUser(
-                user_type='staff',
-                user_id=0,
-                username='open-access',
-                role='admin'
-            )
-            return (fallback_user, {'role': 'admin', 'staff_id': 0})
+            return None
         
         try:
             validated_token = self.get_validated_token(raw_token)
         except InvalidToken:
-            # TEMP: allow all requests as admin when token is invalid
-            fallback_user = CustomUser(
-                user_type='staff',
-                user_id=0,
-                username='open-access',
-                role='admin'
-            )
-            return (fallback_user, {'role': 'admin', 'staff_id': 0})
+            # Let DRF return 401 for invalid tokens instead of treating callers as admin.
+            raise
         
         # Check if it's a patient token
         patient_id = validated_token.get('patient_id')

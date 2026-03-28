@@ -738,16 +738,20 @@ def patient_list(request):
     """List patients (admin/doctor) or create (admin only)"""
     role = request.auth.get("role") if request.auth else None
     staff_id = request.auth.get("staff_id") if request.auth else None
+    has_doctor_patient_requests = _table_exists(DoctorPatientRequest._meta.db_table)
 
     if request.method == "GET":
         qs = Patient.objects.all()
 
         # If a staff_id is present (doctor token), annotate latest request status so pending shows after refresh
-        if staff_id:
-            latest_status = DoctorPatientRequest.objects.filter(
-                patient_id=OuterRef("pk"), doctor_id=staff_id
-            ).order_by("-created_at").values("status")[:1]
-            qs = qs.annotate(request_status=Subquery(latest_status))
+        if staff_id and has_doctor_patient_requests:
+            try:
+                latest_status = DoctorPatientRequest.objects.filter(
+                    patient_id=OuterRef("pk"), doctor_id=staff_id
+                ).order_by("-created_at").values("status")[:1]
+                qs = qs.annotate(request_status=Subquery(latest_status))
+            except (ProgrammingError, DatabaseError):
+                pass
 
         return Response(PatientSerializer(qs, many=True, context={"request": request}).data)
 
@@ -768,6 +772,8 @@ def doctor_request_patient(request):
     if not staff_id:
         return Response({"error": "Not authorized"}, status=403)
 
+    has_doctor_patient_requests = _table_exists(DoctorPatientRequest._meta.db_table)
+
     patient_id = request.data.get("patient_id") or request.query_params.get("patient_id")
     if not patient_id:
         return Response({"error": "patient_id is required"}, status=400)
@@ -786,7 +792,25 @@ def doctor_request_patient(request):
     if current_count >= MAX_DOCTOR_PATIENTS:
         return Response({"error": f"Roster full (max {MAX_DOCTOR_PATIENTS})"}, status=400)
 
-    pending = DoctorPatientRequest.objects.filter(patient_id=patient_id, doctor_id=staff_id, status="pending").first()
+    if not has_doctor_patient_requests:
+        # Legacy DB fallback: table missing, so assign directly.
+        patient_obj.doctor_id = staff_id
+        patient_obj.save(update_fields=["doctor_id"])
+        serializer = PatientSerializer(patient_obj, context={"request": request})
+        return Response({"message": "Patient assigned", "patient": serializer.data}, status=200)
+
+    try:
+        pending = DoctorPatientRequest.objects.filter(patient_id=patient_id, doctor_id=staff_id, status="pending").first()
+    except (ProgrammingError, DatabaseError):
+        pending = None
+        has_doctor_patient_requests = False
+
+    if not has_doctor_patient_requests:
+        patient_obj.doctor_id = staff_id
+        patient_obj.save(update_fields=["doctor_id"])
+        serializer = PatientSerializer(patient_obj, context={"request": request})
+        return Response({"message": "Patient assigned", "patient": serializer.data}, status=200)
+
     if pending:
         # Surface pending request metadata to the serializer so the frontend sees it immediately
         patient_obj.request_status = pending.status
@@ -796,7 +820,13 @@ def doctor_request_patient(request):
         serializer = PatientSerializer(patient_obj, context={"request": request})
         return Response({"message": "Request already pending", "patient": serializer.data})
 
-    req = DoctorPatientRequest.objects.create(patient_id=patient_id, doctor_id=staff_id, status="pending")
+    try:
+        req = DoctorPatientRequest.objects.create(patient_id=patient_id, doctor_id=staff_id, status="pending")
+    except (ProgrammingError, DatabaseError):
+        patient_obj.doctor_id = staff_id
+        patient_obj.save(update_fields=["doctor_id"])
+        serializer = PatientSerializer(patient_obj, context={"request": request})
+        return Response({"message": "Patient assigned", "patient": serializer.data}, status=200)
 
     # Annotate the patient object in-memory with the latest request fields for the response
     patient_obj.request_status = req.status
@@ -816,11 +846,17 @@ def doctor_cancel_request(request):
     if not staff_id:
         return Response({"error": "Not authorized"}, status=403)
 
+    if not _table_exists(DoctorPatientRequest._meta.db_table):
+        return Response({"error": "Request workflow unavailable on current schema"}, status=503)
+
     patient_id = request.data.get("patient_id") or request.query_params.get("patient_id")
     if not patient_id:
         return Response({"error": "patient_id is required"}, status=400)
 
-    pending = DoctorPatientRequest.objects.filter(patient_id=patient_id, doctor_id=staff_id, status="pending").first()
+    try:
+        pending = DoctorPatientRequest.objects.filter(patient_id=patient_id, doctor_id=staff_id, status="pending").first()
+    except (ProgrammingError, DatabaseError):
+        return Response({"error": "Request workflow unavailable on current schema"}, status=503)
     if not pending:
         return Response({"error": "No pending request to cancel"}, status=404)
 
@@ -938,6 +974,9 @@ def patient_handle_request(request):
     if not patient_id:
         return Response({"error": "Not a patient"}, status=403)
 
+    if not _table_exists(DoctorPatientRequest._meta.db_table):
+        return Response({"error": "Request workflow unavailable on current schema"}, status=503)
+
     decision = (request.data.get("decision") or "").strip().lower()
     if decision not in {"accept", "reject"}:
         return Response({"error": "decision must be 'accept' or 'reject'"}, status=400)
@@ -951,7 +990,10 @@ def patient_handle_request(request):
     except Exception:
         return Response({"error": "doctor_id must be an integer"}, status=400)
 
-    req = DoctorPatientRequest.objects.filter(patient_id=patient_id, doctor_id=doctor_id_int, status="pending").order_by("-created_at").first()
+    try:
+        req = DoctorPatientRequest.objects.filter(patient_id=patient_id, doctor_id=doctor_id_int, status="pending").order_by("-created_at").first()
+    except (ProgrammingError, DatabaseError):
+        return Response({"error": "Request workflow unavailable on current schema"}, status=503)
     if not req:
         return Response({"error": "No pending request found"}, status=404)
 
@@ -994,7 +1036,13 @@ def patient_requests(request):
     if not patient_id:
         return Response({"error": "Not a patient"}, status=403)
 
-    qs = DoctorPatientRequest.objects.filter(patient_id=patient_id).select_related("doctor")
+    if not _table_exists(DoctorPatientRequest._meta.db_table):
+        return Response([])
+
+    try:
+        qs = DoctorPatientRequest.objects.filter(patient_id=patient_id).select_related("doctor")
+    except (ProgrammingError, DatabaseError):
+        return Response([])
     serialized = DoctorPatientRequestSerializer(qs, many=True).data
     return Response(serialized)
 
@@ -1163,21 +1211,32 @@ def doctor_patients(request):
     staff_id = request.auth.get("staff_id")
     if not staff_id:
         return Response({"error": "Not authorized"}, status=403)
-    latest_request = DoctorPatientRequest.objects.filter(
-        patient_id=OuterRef("pk"), doctor_id=staff_id
-    ).order_by("-created_at")
 
-    requested_ids = DoctorPatientRequest.objects.filter(doctor_id=staff_id).values("patient_id")
-    qs = Patient.objects.filter(
-        Q(doctor_id=staff_id) | Q(id__in=Subquery(requested_ids))
-    ).distinct()
+    has_doctor_patient_requests = _table_exists(DoctorPatientRequest._meta.db_table)
 
-    qs = qs.annotate(
-        request_status=Subquery(latest_request.values("status")[:1]),
-        request_created_at=Subquery(latest_request.values("created_at")[:1]),
-        request_updated_at=Subquery(latest_request.values("updated_at")[:1]),
-        request_doctor_id=Subquery(latest_request.values("doctor_id")[:1]),
-    )
+    if not has_doctor_patient_requests:
+        qs = Patient.objects.filter(doctor_id=staff_id)
+        serialized = PatientSerializer(qs, many=True, context={"request": request}).data
+        return Response(serialized)
+
+    try:
+        latest_request = DoctorPatientRequest.objects.filter(
+            patient_id=OuterRef("pk"), doctor_id=staff_id
+        ).order_by("-created_at")
+
+        requested_ids = DoctorPatientRequest.objects.filter(doctor_id=staff_id).values("patient_id")
+        qs = Patient.objects.filter(
+            Q(doctor_id=staff_id) | Q(id__in=Subquery(requested_ids))
+        ).distinct()
+
+        qs = qs.annotate(
+            request_status=Subquery(latest_request.values("status")[:1]),
+            request_created_at=Subquery(latest_request.values("created_at")[:1]),
+            request_updated_at=Subquery(latest_request.values("updated_at")[:1]),
+            request_doctor_id=Subquery(latest_request.values("doctor_id")[:1]),
+        )
+    except (ProgrammingError, DatabaseError):
+        qs = Patient.objects.filter(doctor_id=staff_id)
 
     serialized = PatientSerializer(qs, many=True, context={"request": request}).data
     return Response(serialized)
@@ -1186,6 +1245,44 @@ def doctor_patients(request):
 # ============== Device Endpoints ==============
 
 DEVICE_REQUIRED_COLUMNS = {"label", "brand", "status", "last_synced"}
+READINGS_DRAFT_REQUIRED_COLUMNS = {
+    field.column
+    for field in ReadingDraft._meta.concrete_fields
+    if getattr(field, "column", None)
+}
+
+
+def _table_exists(table_name: str) -> bool:
+    try:
+        with connection.cursor() as cursor:
+            return table_name in connection.introspection.table_names(cursor)
+    except Exception:
+        # Don't block requests when introspection fails.
+        return True
+
+
+def _readings_draft_supports_model_columns() -> bool:
+    """Detect whether readings_draft has all columns expected by the current model."""
+    try:
+        with connection.cursor() as cursor:
+            description = connection.introspection.get_table_description(cursor, ReadingDraft._meta.db_table)
+    except Exception:
+        return True
+
+    column_names = {col.name for col in description}
+    return READINGS_DRAFT_REQUIRED_COLUMNS.issubset(column_names)
+
+
+def _schema_outdated_response(table_name: str) -> Response:
+    return Response(
+        {
+            "error": (
+                f"Database schema for '{table_name}' is outdated. "
+                "Apply backend/schema_patch_add_missing_columns.sql and backend/new_tables.sql, then retry."
+            )
+        },
+        status=503,
+    )
 
 
 def _devices_support_extended_fields() -> bool:
@@ -1393,6 +1490,9 @@ def device_detail(request, pk):
 @permission_classes([AllowAny])  # auth optional for demo; GET still scopes to patient_id
 def reading_list(request):
     """List or create readings against the readings_draft table"""
+    if not _table_exists(ReadingDraft._meta.db_table) or not _readings_draft_supports_model_columns():
+        return _schema_outdated_response(ReadingDraft._meta.db_table)
+
     auth_payload = request.auth or {}
     patient_id = auth_payload.get("patient_id")
     role = auth_payload.get("role")
@@ -1703,6 +1803,9 @@ def reading_list(request):
 @permission_classes([IsAuthenticated])
 def reading_stats(request):
     """Get aggregated stats from readings_draft"""
+    if not _table_exists(ReadingDraft._meta.db_table) or not _readings_draft_supports_model_columns():
+        return _schema_outdated_response(ReadingDraft._meta.db_table)
+
     patient_id = request.auth.get("patient_id")
 
     if not patient_id:
@@ -1763,6 +1866,9 @@ def reading_stats(request):
 @permission_classes([IsAuthenticated])
 def reading_streaks(request):
     """Return goal-completed dates (or reading dates when no goals) and streak counts for a patient."""
+    if not _table_exists(ReadingDraft._meta.db_table) or not _readings_draft_supports_model_columns():
+        return _schema_outdated_response(ReadingDraft._meta.db_table)
+
     patient_id = request.auth.get("patient_id")
     if not patient_id:
         patient_id = request.query_params.get("patient_id")
@@ -2231,6 +2337,9 @@ def ai_chat(request):
 @permission_classes([IsAuthenticated])
 def ai_recommendations(request):
     """Generate short lifestyle recommendations using OpenAI"""
+    if not _table_exists(ReadingDraft._meta.db_table) or not _readings_draft_supports_model_columns():
+        return _schema_outdated_response(ReadingDraft._meta.db_table)
+
     patient_id = request.auth.get("patient_id")
     if not patient_id:
         patient_id = request.query_params.get("patient_id") or None
@@ -2427,6 +2536,9 @@ def ai_recommendations(request):
 @permission_classes([IsAuthenticated])
 def goal_list(request):
     """List or create goals"""
+    if not _table_exists(Goal._meta.db_table):
+        return _schema_outdated_response(Goal._meta.db_table)
+
     patient_id = request.auth.get("patient_id")
     
     if request.method == "GET":
@@ -2666,6 +2778,9 @@ def threshold_detail(request, pk):
 @permission_classes([IsAuthenticated])
 def alert_list(request):
     """List alerts"""
+    if not _table_exists(Alert._meta.db_table):
+        return _schema_outdated_response(Alert._meta.db_table)
+
     patient_id = request.auth.get("patient_id")
     role = request.auth.get("role")
     # Default: only show alerts for the current day unless caller opts out

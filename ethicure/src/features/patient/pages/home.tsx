@@ -8,7 +8,7 @@ import {
   Droplet,
   Flame,
   HeartPulse,
-  MoonStar,
+  // MoonStar,
   ArrowRight,
   Sparkles,
   Stethoscope,
@@ -33,13 +33,13 @@ import {
   listGoals,
   listAlerts,
   listReadings,
-  getPatientDetail,
+  // getPatientDetail,
   getPatientProfile,
   getPatientPublic,
   API_BASE_URL,
   type ReadingRow,
   type ReadingStat,
-  type PatientProfile,
+  // type PatientProfile,
 } from "@/lib/api"
 type Status = "Stable" | "Monitor" | "Attention"
 
@@ -420,6 +420,8 @@ function buildConnectedMetricSet(devices: BackendDevice[]): Set<string> {
     steps: "steps",
     step_count: "steps",
     calories: "calories",
+    sleep: "sleep",
+    sleep_score: "sleep",
   }
 
   for (const device of devices) {
@@ -432,6 +434,29 @@ function buildConnectedMetricSet(devices: BackendDevice[]): Set<string> {
   }
 
   return connected
+}
+
+function recommendationMetricToKey(metric?: string | null): string | null {
+  const raw = String(metric || "").trim().toLowerCase()
+  if (!raw) return null
+
+  const normalized = raw.replace(/\s+/g, "_")
+  const aliases: Record<string, string> = {
+    heart_rate: "heart_rate",
+    heartrate: "heart_rate",
+    blood_pressure: "blood_pressure",
+    bp: "blood_pressure",
+    glucose: "glucose",
+    oxygen: "oxygen",
+    spo2: "oxygen",
+    steps: "steps",
+    activity: "steps",
+    calories: "calories",
+    sleep: "sleep",
+    sleep_score: "sleep",
+  }
+
+  return aliases[normalized] ?? aliases[normalized.replace(/[^a-z0-9_]/g, "")] ?? null
 }
 
 export default function HomePage() {
@@ -513,7 +538,8 @@ export default function HomePage() {
         ])
         if (cancelled) return
 
-        setConnectedMetrics(buildConnectedMetricSet(devices))
+        const connectedMetricSet = buildConnectedMetricSet(devices)
+        setConnectedMetrics(connectedMetricSet)
         const today = new Date()
         const todaysRows = rows.filter((r) => isToday(r.recorded_at, today))
         const latest = buildLatestMetrics(rows)
@@ -578,12 +604,18 @@ export default function HomePage() {
           setStreakCompletionDates((streakData.dates || []).map((d) => new Date(d)))
         }
 
-        setRecommendations(
-          (recs || []).map((r) => ({
+        const filteredRecommendations = (recs || [])
+          .filter((r) => {
+            const metricKey = recommendationMetricToKey(r.metric)
+            if (!metricKey) return true
+            return connectedMetricSet.has(metricKey)
+          })
+          .map((r) => ({
             title: r.metric || "Recommendation",
             detail: r.text,
           }))
-        )
+
+        setRecommendations(filteredRecommendations)
 
         // Prefer API alerts (already scoped to today by backend) and fall back to derived when none
         const backendAlerts = (alertData || []).slice(0, 5).map((a) => {

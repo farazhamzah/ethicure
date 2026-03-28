@@ -132,8 +132,12 @@ export default function AiAssistantPage() {
   function startNewChat(prefill?: string) {
     const next = makeSession()
     const title = prefill ? updateTitleFromPrompt(next, prefill) : next.title
-    const seeded = prefill
-      ? { ...next, title, messages: [...next.messages, { role: "user", content: prefill }] }
+    const seeded: ChatSession = prefill
+      ? {
+          ...next,
+          title,
+          messages: [...next.messages, { role: "user", content: prefill } as ChatMessage],
+        }
       : next
     setSessions((prev) => [seeded, ...prev])
     setActiveSessionId(seeded.id)
@@ -147,7 +151,7 @@ export default function AiAssistantPage() {
 
     const sessionId = activeSession.id
     const title = updateTitleFromPrompt(activeSession, trimmed)
-    const nextMessages = [...activeSession.messages, { role: "user", content: trimmed }]
+    const nextMessages: ChatMessage[] = [...activeSession.messages, { role: "user", content: trimmed } as ChatMessage]
 
     setSessions((prev) =>
       prev.map((session) =>
@@ -172,7 +176,7 @@ export default function AiAssistantPage() {
           session.id === sessionId
             ? {
                 ...session,
-                messages: [...nextMessages, { role: "assistant", content: response.answer || "" }],
+                messages: [...nextMessages, { role: "assistant", content: response.answer || "" } as ChatMessage],
                 summary: response.summary ?? session.summary ?? null,
                 riskFlags: Array.isArray(response.risk_flags) ? response.risk_flags : session.riskFlags ?? [],
               }
@@ -186,7 +190,10 @@ export default function AiAssistantPage() {
           session.id === sessionId
             ? {
                 ...session,
-                messages: [...nextMessages, { role: "assistant", content: "I couldn't respond just now. Please try again." }],
+                messages: [
+                  ...nextMessages,
+                  { role: "assistant", content: "I couldn't respond just now. Please try again." } as ChatMessage,
+                ],
               }
             : session,
         ),

@@ -1,9 +1,9 @@
 import { useEffect } from "react"
 import { createReading } from "@/lib/api"
 
-function randInt(min: number, max: number) {
-  return Math.floor(Math.random() * (max - min + 1)) + min
-}
+// function randInt(min: number, max: number) {
+//   return Math.floor(Math.random() * (max - min + 1)) + min
+// }
 
 function dailyFraction(hour: number, minute: number) {
   const p = (hour + minute / 60 + 1) / 24
@@ -86,8 +86,8 @@ export default function useAutoGenerate() {
         const cumulativeCalories = Math.max(profile.lastCalories || 0, desiredCalories)
 
         // small per-2-minute variability for instantaneous values
-        const instantSteps = Math.max(0, cumulativeSteps - (profile.lastSteps || 0))
-        const instantCalories = Math.max(0, cumulativeCalories - (profile.lastCalories || 0))
+        // const instantSteps = Math.max(0, cumulativeSteps - (profile.lastSteps || 0))
+        // const instantCalories = Math.max(0, cumulativeCalories - (profile.lastCalories || 0))
 
         // vitals and extras (populate many ReadingDraft columns)
         const heartRate = Math.round( (70 + (Math.random()-0.5)*12 + (hour>=16 && hour<=20 ? 3 : 0)) * 10 ) / 10
@@ -150,7 +150,7 @@ export default function useAutoGenerate() {
           calories_device_id: 5,
           calories: cumulativeCalories,
           basal_calories,
-          calories: cumulativeCalories, // fill the simple calories column
+          // calories: cumulativeCalories, // duplicate key intentionally disabled
           total_calories: cumulativeCalories,
           metabolic_equivalent,
           oxygen_device_id: 6,

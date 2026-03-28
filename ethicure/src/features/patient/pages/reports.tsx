@@ -936,7 +936,7 @@ export default function ReportsPage({
     if (!pdfUrl) return
     const link = document.createElement("a")
     link.href = pdfUrl
-    link.download = "ethicare-report.pdf"
+    link.download = "ethicure-report.pdf"
     link.click()
   }
 

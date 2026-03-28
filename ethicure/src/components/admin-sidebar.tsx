@@ -60,6 +60,7 @@ export function AdminSidebar({ ...props }: React.ComponentProps<typeof Sidebar>)
       // Prefer staff profile when we have a staff id (admin/doctor login).
       const staffIdRaw = typeof window !== "undefined" ? window.localStorage.getItem("staffId") : null
       const staffId = staffIdRaw ? Number(staffIdRaw) : NaN
+      const authRole = typeof window !== "undefined" ? window.localStorage.getItem("authRole") : null
 
       if (!Number.isNaN(staffId) && staffId > 0) {
         try {
@@ -87,8 +88,16 @@ export function AdminSidebar({ ...props }: React.ComponentProps<typeof Sidebar>)
             return
           }
         } catch (err) {
-          // fall back to patient profile below
+          // fall back to patient profile below only for patient sessions
         }
+
+        // If a staff id is present, avoid hitting patient-only profile endpoint.
+        return
+      }
+
+      // In admin/doctor sessions, patient profile endpoint is expected to return 403.
+      if (authRole === "admin" || authRole === "doctor") {
+        return
       }
 
       try {
