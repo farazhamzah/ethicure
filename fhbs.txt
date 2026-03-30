@@ -1,6 +1,6 @@
 Demo credentials (seeded):
 
-Patient: faraz722@hotmail.com / Faraz@123
+Patient: patient@test.com/ Faraz@123
 Patient fh2046@hw.ac.uk / adminpass
 Admin: admin@test.com / Faraz@123
 Doctor: doctor@test.com / Faraz@123
