@@ -186,6 +186,7 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 
 # AI API key (testing default; override via environment variable in non-testing environments)
+# THE KEY BELOW IS A DEMO PLACEHOLDER AND WILL HAVE TO BE REPLACED WITH YOUR ACTUAL KEY
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "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")
 
 # Email configuration for password reset OTP
