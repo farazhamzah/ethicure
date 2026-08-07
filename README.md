@@ -179,7 +179,7 @@ lsof -i :5173
 kill <PID>
 ```
 
-If needed:
+If needed: 
 
 ```bash
 kill -9 <PID>
